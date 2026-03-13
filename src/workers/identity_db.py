@@ -246,6 +246,31 @@ def update_photo_status(cur, photo_uuid: str, status: str,
 # ═══════════════════════════════════════════════════════════════════
 
 
+# ── Enrollment type rank (lower = higher confidence) ─────────────
+# Used to decide whether an incoming enrollment should overwrite an
+# existing centroid when the similarity gate rejects a blend.
+_ENROLL_RANK = {
+    "golden_sample":           0,
+    "golden_partial":          1,
+    "golden_delayed":          2,
+    "error_map_timing":        3,
+    "ocr_unvalidated":         4,
+    "blind_trust":             5,
+    "hint_remainder":          6,
+    "ghost_adopted":           7,
+    "ghost":                   8,
+}
+
+
+def _biometric_sim(face_vec, existing_face_pg,
+                   reid_vec=None, existing_reid_pg=None) -> float:
+    """Best available biometric similarity (face preferred, ReID fallback)."""
+    face_sim = _cosine_sim(face_vec, existing_face_pg)
+    if face_sim > 0:
+        return face_sim
+    return _cosine_sim(reid_vec, existing_reid_pg)
+
+
 def enroll_identity(cur, project_id: str, bib: str,
                     face_vec=None, reid_vec=None,
                     enrollment_type: str = "golden_sample") -> str:
@@ -263,7 +288,7 @@ def enroll_identity(cur, project_id: str, bib: str,
         VALUES (%s, %s, %s, %s::vector, %s::vector, %s)
         ON CONFLICT (project_id, bib) WHERE bib IS NOT NULL
         DO UPDATE SET updated_at = now()
-        RETURNING id, face_centroid, reid_centroid, sighting_count
+        RETURNING id, face_centroid, reid_centroid, sighting_count, enrollment_type
     """, (rid, project_id, bib,
           _vec_to_pg(face_vec), _vec_to_pg(reid_vec),
           enrollment_type))
@@ -272,31 +297,61 @@ def enroll_identity(cur, project_id: str, bib: str,
     existing_face_pg = row[1]
     existing_reid_pg = row[2]
     sighting_count = row[3] or 1
+    existing_enrollment = row[4] or "ghost"
 
     # Blend biometric vectors if provided
     if face_vec is not None or reid_vec is not None:
         # ── Enrollment similarity gate ────────────────────────────
-        # Once the centroid is stable (≥ 2 sightings), reject blends
-        # from clearly different people.  Prevents centroid poisoning
-        # when a wrong person's photo is assigned the same bib.
-        if (sighting_count >= 2
-                and existing_face_pg is not None
-                and face_vec is not None):
-            sim = _cosine_sim(face_vec, existing_face_pg)
+        # Always check biometric similarity before blending.  Prevents
+        # centroid poisoning when a wrong person is assigned the same bib.
+        # Uses face similarity with ReID fallback when face is unavailable.
+        has_existing = (existing_face_pg is not None or existing_reid_pg is not None)
+        has_incoming = (face_vec is not None or reid_vec is not None)
+        if has_existing and has_incoming and sighting_count >= 2:
+            sim = _biometric_sim(face_vec, existing_face_pg,
+                                 reid_vec, existing_reid_pg)
             if sim < _cfg.ENROLLMENT_MIN_SIM:
-                logger.warning(
-                    "enrollment_blend_rejected bib=%s sim=%.3f "
-                    "threshold=%.2f sightings=%d",
-                    bib, sim, _cfg.ENROLLMENT_MIN_SIM, sighting_count,
-                )
-                # Increment sighting count but do NOT blend vectors
-                cur.execute("""
-                    UPDATE pipeline.identities SET
-                        sighting_count = sighting_count + 1,
-                        updated_at = now()
-                    WHERE id = %s
-                """, (rid,))
-                return rid
+                incoming_rank = _ENROLL_RANK.get(enrollment_type, 8)
+                existing_rank = _ENROLL_RANK.get(existing_enrollment, 8)
+
+                if incoming_rank < existing_rank:
+                    # Higher-confidence type overrides a lower one:
+                    # replace the centroid entirely instead of blending.
+                    logger.warning(
+                        "enrollment_rank_override bib=%s sim=%.3f "
+                        "incoming=%s(rank=%d) existing=%s(rank=%d) "
+                        "sightings=%d → replacing centroid",
+                        bib, sim, enrollment_type, incoming_rank,
+                        existing_enrollment, existing_rank, sighting_count,
+                    )
+                    cur.execute("""
+                        UPDATE pipeline.identities SET
+                            face_centroid  = COALESCE(%s::vector, face_centroid),
+                            reid_centroid  = COALESCE(%s::vector, reid_centroid),
+                            enrollment_type = %s,
+                            sighting_count = 2,
+                            updated_at     = now()
+                        WHERE id = %s
+                    """, (_vec_to_pg(face_vec), _vec_to_pg(reid_vec),
+                          enrollment_type, rid))
+                    return rid
+                else:
+                    # Lower or equal confidence — reject the blend.
+                    logger.warning(
+                        "enrollment_blend_rejected bib=%s sim=%.3f "
+                        "threshold=%.2f incoming=%s existing=%s "
+                        "sightings=%d",
+                        bib, sim, _cfg.ENROLLMENT_MIN_SIM,
+                        enrollment_type, existing_enrollment,
+                        sighting_count,
+                    )
+                    cur.execute("""
+                        UPDATE pipeline.identities SET
+                            sighting_count = sighting_count + 1,
+                            updated_at = now()
+                        WHERE id = %s
+                    """, (rid,))
+                    return rid
 
         shard_created = _update_or_create_shard(
             cur, rid, face_vec, reid_vec,
@@ -359,6 +414,27 @@ def ensure_identity(cur, project_id: str, bib: Optional[str],
 
         # If face/reid vecs are provided, blend them in
         if face_vec is not None or reid_vec is not None:
+            # ── Similarity gate (same as enroll_identity) ─────────
+            has_existing = (existing_face_pg is not None
+                           or existing_reid_pg is not None)
+            has_incoming = (face_vec is not None or reid_vec is not None)
+            if has_existing and has_incoming and sighting_count >= 2:
+                sim = _biometric_sim(face_vec, existing_face_pg,
+                                     reid_vec, existing_reid_pg)
+                if sim < _cfg.ENROLLMENT_MIN_SIM:
+                    logger.warning(
+                        "ensure_identity_blend_rejected bib=%s sim=%.3f "
+                        "threshold=%.2f sightings=%d",
+                        bib, sim, _cfg.ENROLLMENT_MIN_SIM, sighting_count,
+                    )
+                    cur.execute("""
+                        UPDATE pipeline.identities SET
+                            sighting_count = sighting_count + 1,
+                            updated_at = now()
+                        WHERE id = %s
+                    """, (rid,))
+                    return rid
+
             shard_created = _update_or_create_shard(
                 cur, rid, face_vec, reid_vec,
                 existing_face_pg, existing_reid_pg,

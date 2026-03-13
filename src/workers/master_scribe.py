@@ -63,6 +63,23 @@ from src.messaging import create_local_connection, create_vps_connection
 from src.workers import identity_db as db
 from src.metrics.log_config import configure as _configure_structlog
 
+# ── Intent processing priority (lower = processed first) ─────────
+# Ensures highest-confidence match_type wins the first INSERT into
+# pipeline.identities, setting the centroid before weaker types arrive.
+_MATCH_TYPE_PRIORITY = {
+    "golden_sample":           0,
+    "golden_partial":          1,
+    "golden_delayed":          2,
+    "error_map_timing":        3,
+    "ocr_unvalidated":         4,
+    "blind_trust":             5,
+    "hint_remainder":          6,
+    "ghost_adopted":           7,
+    "ghost":                   8,
+    "ghost_multi_bib":         9,
+    "ghost_ambiguous_partial": 9,
+}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -314,8 +331,14 @@ class MasterScribe:
             if actual_uuids:
                 db.delete_subjects_for_photos(cur, actual_uuids)
 
-            # 3. Process identity intents
-            for intent in intents:
+            # 3. Process identity intents (sorted by match-type confidence
+            #    so the strongest evidence sets the centroid first)
+            sorted_intents = sorted(
+                intents,
+                key=lambda i: _MATCH_TYPE_PRIORITY.get(
+                    i.get("match_type", "ghost"), 8),
+            )
+            for intent in sorted_intents:
                 assigned_bib = intent.get("assigned_bib")
                 match_type = intent.get("match_type", "ghost")
 
