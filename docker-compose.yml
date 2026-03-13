@@ -1,0 +1,177 @@
+# pixxEngine Docker Compose Configuration
+# Infrastructure: PostgreSQL + RabbitMQ
+# ============================================
+# SECURITY: Precision Interface Binding
+# - PostgreSQL: localhost only (Scribe on GPU1)
+# - RabbitMQ AMQP: LAN + Tailscale (GPU2 + VPS)
+# - Management UIs: localhost only (SSH tunnel)
+# ============================================
+# Run with: docker compose up -d
+
+services:
+  # ============================================
+  # PostgreSQL Database with pgvector
+  # ============================================
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: pixxengine_postgres
+    environment:
+      POSTGRES_USER: pixxadmin
+      POSTGRES_PASSWORD: "Daniela1984+++"
+      POSTGRES_DB: pixxengine
+      # Enforce password authentication
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      # Security: Restrict listening to container interface
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./data/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./config/postgres/init-security.sh:/docker-entrypoint-initdb.d/99-security.sh:ro
+    ports:
+      # 🔒 Accessible on LAN by services (Dashboard, etc.)
+      - "192.168.1.100:5432:5432"
+      - "100.122.88.68:5432:5432"   # Tailscale (for VPS sync)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pixxadmin -d pixxengine"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - pixxengine_net
+
+  # ============================================
+  # RabbitMQ Message Broker
+  # ============================================
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: pixxengine_rabbitmq
+    hostname: pixxengine-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: pixxGPU
+      RABBITMQ_DEFAULT_PASS: "SaF0J3D8r73vi0W1YxTCzDxJrscVJ4Qv"
+      RABBITMQ_DEFAULT_VHOST: pixxengine
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./config/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./config/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./config/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    ports:
+      # 📡 AMQP: Accessible by GPU2 (LAN) and VPS (Tailscale)
+      - "192.168.1.100:5672:5672"   # LAN (for GPU2)
+      - "100.122.88.68:5672:5672"   # Tailscale (for VPS)
+      # 🔒 Management UI: Tailscale only (for admin access)
+      - "100.122.88.68:15672:15672" # Tailscale (admin)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - pixxengine_net
+
+  # ============================================
+  # Loki — Log Aggregation Backend
+  # ============================================
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: pixxengine_loki
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./config/loki/config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+    ports:
+      # 🔒 Loki API: localhost only (Promtail connects via Docker network)
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - pixxengine_net
+
+  # ============================================
+  # Promtail — Log Scraper → Loki
+  # ============================================
+  promtail:
+    image: grafana/promtail:3.4.2
+    container_name: pixxengine_promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./config/promtail/config.yml:/etc/promtail/config.yml:ro
+      # Worker log files (written by systemd services)
+      - /opt/pixxEngine/logs:/var/log/pixxengine:ro
+      # Docker container logs (PostgreSQL, RabbitMQ)
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - pixxengine_net
+
+  # ============================================
+  # Grafana — Dashboard & Log Explorer
+  # ============================================
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: pixxengine_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: pixxadmin
+      GF_SECURITY_ADMIN_PASSWORD: "pixxEngine2026"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: "http://100.122.88.68:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      # 🔒 Tailscale only — access from your laptop via Tailscale
+      - "100.122.88.68:3000:3000"
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - pixxengine_net
+
+networks:
+  pixxengine_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  loki_data:
+  grafana_data:

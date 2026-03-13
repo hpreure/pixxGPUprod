@@ -1,0 +1,28 @@
+[Unit]
+Description=pixxEngine Image Feeder — Tier 0: R2 Download & SHM Staging
+After=network.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pixxadmin
+Group=pixxadmin
+WorkingDirectory=/opt/pixxEngine
+Environment="PATH=/opt/pixxEngine/pixxEngine_venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONPATH=/opt/pixxEngine"
+ExecStart=/opt/pixxEngine/pixxEngine_venv/bin/python -m src.workers.image_feeder
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/opt/pixxEngine/logs/image_feeder.log
+StandardError=append:/opt/pixxEngine/logs/image_feeder_error.log
+
+# Resource limits — network I/O bound, minimal CPU/memory
+MemoryLimit=4G
+CPUQuota=200%
+
+# Security
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

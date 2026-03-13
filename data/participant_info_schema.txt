@@ -1,0 +1,8 @@
+participant_info Table Schema
+================================================================================
+id                             integer                   NULL: NO  Default: nextval('participant_info_id_seq'::regclass)
+project_id                     character varying         NULL: NO  Default: None
+bib_number                     character varying         NULL: NO  Default: None
+finish_time                    character varying         NULL: YES Default: None
+extra_data                     jsonb                     NULL: YES Default: '{}'::jsonb
+created_at                     timestamp with time zone  NULL: YES Default: CURRENT_TIMESTAMP
