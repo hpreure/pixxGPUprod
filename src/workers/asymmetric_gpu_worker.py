@@ -29,12 +29,12 @@ Strict Separation of Concerns
    - Publishes ``raw_inference_results`` for bib-detection bursts (→ CPU worker).
    - Publishes ``scribe_tasks`` for calibration results (→ DB scribe, bypasses CPU).
    - **Deletes images from /dev/shm** after inference (claim-check cleanup).
-   - NEVER builds tracklets, performs IoU matching, resolves identity, or
+   - NEVER performs identity clustering, IoU matching, resolves identity, or
      touches PostgreSQL.
 
  CPU Worker (``cpu_worker.py``):
    - Consumes ``raw_inference_results``.
-   - Builds tracklets, runs consensus OCR, resolves identity.
+   - Runs identity clustering, consensus OCR, and identity resolution.
    - Publishes to ``scribe_tasks`` for async DB writes.
 
 Priority Rules

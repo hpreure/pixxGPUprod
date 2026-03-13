@@ -15,7 +15,7 @@ deferred to the Master Scribe.
 
 Timing-Lock Design Note:
   The V1.5 cpu_worker used a per-frame "timing-lock" hard veto during
-  tracklet linking to prevent merging detections whose timing-confirmed
+  identity clustering to prevent merging detections whose timing-confirmed
   bibs conflict.  In V3, this protection is naturally provided by the
   clustering merge logic's three-step decision per cluster candidate:
     1. Hard Veto — two crops with conflicting OCR cannot merge.
@@ -333,7 +333,7 @@ def cluster_burst_detections(
       3. **Hint Disambiguation Veto** — if both have compatible (but
          non-identical) OCR and *both* bibs are in ``burst_hints``,
          they are physically co-present on the mat → treat as conflict.
-         STRICTLY hints-only to avoid fracturing tracklets over typos
+         STRICTLY hints-only to avoid fracturing clusters over typos
          of runners who finished hours apart.
       4. **Hard Anchor** — if both have OCR and the bibs are compatible, merge.
       5. **Biometric Gravitation** — when OCR doesn't resolve the decision
@@ -426,7 +426,7 @@ def cluster_burst_detections(
                             matched_cluster = cluster
                             break
 
-            # Fallback for new tracklets (handles Ambiguous Partials automatically)
+            # Fallback: start a new cluster (handles Ambiguous Partials automatically)
             if matched_cluster is None:
                 matched_cluster = IdentityCluster()
                 clusters.append(matched_cluster)
@@ -822,9 +822,9 @@ def process_payload(payload: dict) -> bool:
                 len(img.get("persons", []))
                 for img in payload.get("images", []) if img.get("success")
             ),
-            tracklets_total=len(clusters),
-            tracklets_matched=len(matched),
-            tracklets_ghosts=ghosts,
+            clusters_total=len(clusters),
+            clusters_matched=len(matched),
+            clusters_ghosts=ghosts,
             match_type_distribution=match_types,
             priority=priority,
             is_finish_line=is_fl,

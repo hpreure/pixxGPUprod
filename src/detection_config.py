@@ -186,7 +186,7 @@ class DetectionConfig:
     # anywhere in the burst (the "anchor subject").  Eliminates distant
     # spectators who are dwarfed by foreground athletes.  The anchor is
     # computed once per burst (from non-border-touching boxes only) so
-    # the threshold stays stable and does not cause tracklet fragmentation.
+    # the threshold stays stable and does not cause cluster fragmentation.
     # History: 0.20 → 0.30 → 0.22 (0.30 too aggressive for finish-line
     # perspective depth where foreground runners dominate at 4-5% area
     # and mid-distance runners sit at 0.5-1.5%).
@@ -218,7 +218,7 @@ class DetectionConfig:
     # Laplacian variance threshold for blur flagging.  Crops below this
     # value are soft-flagged (PersonDetection.is_blurry = True) and
     # excluded from OCR voting and biometric blending while still
-    # contributing to tracklet continuity.  Not a hard filter.
+    # contributing to cluster continuity.  Not a hard filter.
     # Sharp race subjects typically score 150+; motion-blurred or
     # defocused close-passers fall below 70.  Set to 0.0 to disable.
     BLUR_THRESHOLD: float = 70.0
@@ -226,10 +226,10 @@ class DetectionConfig:
     # Minimum face-quality score required to trust biometric vectors
     # (face_vector and reid_vector) from a detection.  Below this
     # threshold, vectors are nulled — the detection keeps its OCR,
-    # bbox, and tracklet-continuity contribution but cannot be used
+    # bbox, and cluster-membership contribution but cannot be used
     # for face/ReID matching.  This prevents noisy embeddings from
     # low-quality crops (distant, blurred, side-profile) from causing
-    # false merges in tracklet linking.
+    # false merges during identity clustering.
     # Analysis on project 159: FQ<0.80 is 66% ghosts, 4× the rate of
     # FQ>=0.80 (17%).  Only 9 runners out of 1 810 identities would
     # lose all biometric coverage — all 9 retain their OCR-based bib.
@@ -245,7 +245,7 @@ class DetectionConfig:
 
     # Minimum separation (seconds) between the nearest and second-nearest
     # hint finish times for the proximity tiebreaker in blind trust.
-    # When a single-tracklet burst has multiple unclaimed hints and no OCR,
+    # When a single-cluster burst has multiple unclaimed hints and no OCR,
     # we pick the nearest hint IFF it is at least this many seconds closer
     # than the runner-up.  At 0.5 s the timing mat resolution is enough to
     # distinguish adjacent finishers in almost all real packs.
@@ -271,44 +271,21 @@ class DetectionConfig:
     MIN_BIB_DIGITS: int = 2
 
     # ==========================================
-    # 5. TRACKLET LINKING (Cross-Frame Association)
+    # 5. IDENTITY CLUSTERING (Cross-Frame Association)
     # ==========================================
     #
-    # Tracklet linking associates person detections across frames within
-    # a burst into a single identity track.  The linking score is a
-    # 4-tier weighted sum computed by _match_score():
+    # Identity clustering merges person crops across burst frames
+    # into IdentityClusters using a 5-step greedy algorithm in
+    # cluster_burst_detections() (id_cluster.py):
     #
-    #   Tier 1 — OCR:  Hard lock/veto.  When both detections carry a
-    #            bib read at ≥ OCR_LOCK_CONF, the bib comparison
-    #            overrides all lower tiers:
-    #              exact match   → OCR_EXACT_BONUS  (guaranteed link)
-    #              substring     → OCR_PARTIAL_BONUS (strong link)
-    #              conflict      → OCR_CONFLICT_VETO (forced split)
+    #   Step 1 — Ambiguous Partial Pre-Filter (multi-hint substring)
+    #   Step 2 — Hard Veto (conflicting OCR → skip)
+    #   Step 3 — Hint Disambiguation Veto (co-present bibs)
+    #   Step 4 — Hard Anchor (compatible OCR → merge)
+    #   Step 5 — Biometric Gravitation (face cosine ≥ FACE_MODERATE_SIM)
     #
-    #   Tier 2 — Face: Biometric anchor. High cosine similarity
-    #            (≥ FACE_STRONG_SIM) adds a large bonus; moderate
-    #            similarity blends linearly; low similarity penalises.
-    #
-    #   Tier 3 — IoU:  Spatial continuity.  Weighted by
-    #            TRACKLET_IOU_WEIGHT.  When IoU ≥ TRACKLET_IOU_ALONE
-    #            the raw IoU value is used (stronger signal).
-    #
-    #   Tier 4 — ReID: Soft tie-breaker only.  Weighted by
-    #            TRACKLET_REID_WEIGHT.  Useful when face is missing
-    #            but never overrides higher tiers.
-    #
-    # The Hungarian algorithm (linear_sum_assignment) maximises the
-    # total score.  Pairs scoring below TRACKLET_MIN_SCORE spawn new
-    # tracklets instead of linking.
-
-    # Weight hierarchy (OCR is implicit via bonuses/vetoes above)
-    TRACKLET_FACE_WEIGHT: float = 0.50
-    TRACKLET_IOU_WEIGHT: float = 0.30
-    TRACKLET_REID_WEIGHT: float = 0.20
-
-    # Minimum combined score for two detections to be linked into the
-    # same tracklet.  Below this threshold, a new tracklet is spawned.
-    TRACKLET_MIN_SCORE: float = 0.25
+    # Rule 13 (Concurrent Frame Veto): crops from the same photo_id
+    # can never merge into the same cluster.
 
     # ── OCR tier ─────────────────────────────────────────────────
     # Minimum OCR confidence for a bib reading to participate in the
@@ -327,8 +304,8 @@ class DetectionConfig:
     OCR_PARTIAL_BONUS: float = 2.0
 
     # Hard conflict veto: different bibs on different people.
-    # Set to −∞ so the Hungarian algorithm is forced to split them
-    # into separate tracklets regardless of biometric similarity.
+    # Extremely negative value forces a split regardless of any
+    # biometric similarity.
     OCR_CONFLICT_VETO: float = -1e9
 
     # ── Face tier ────────────────────────────────────────────────
@@ -348,17 +325,11 @@ class DetectionConfig:
     FACE_CONFLICT_SIM: float = 0.20
     FACE_CONFLICT_PENALTY: float = -1.0
 
-    # ── IoU tier ─────────────────────────────────────────────────
-    # When IoU ≥ this value, the raw IoU is used as the score instead
-    # of IoU × TRACKLET_IOU_WEIGHT — spatial overlap alone is a
-    # reliable link signal (the boxes mostly overlap).
-    TRACKLET_IOU_ALONE: float = 0.50
-
     # ==========================================
     # 6. CASCADE MATCH (Global Biometric Fallback)
     # ==========================================
     #
-    # When hint-guided and OCR-based steps fail to identify a tracklet,
+    # When hint-guided and OCR-based steps fail to identify a cluster,
     # the cascade match scans ALL enrolled identities in the project
     # and accepts the first candidate exceeding one of these threshold
     # paths (evaluated in order):
@@ -379,7 +350,7 @@ class DetectionConfig:
     CASCADE_SOLO_REID: float = 0.88
 
     # Hint-biometric guardrails — require BOTH face AND reid to agree
-    # before attributing a bibless tracklet to a timing hint.  The old
+    # before attributing a bibless cluster to a timing hint.  The old
     # OR gate let a single weak signal (face 0.42 alone) assign the
     # wrong runner when multiple finishers cross in the same 2-second
     # window.  AND + best-hint-wins eliminates first-match ordering
@@ -392,13 +363,13 @@ class DetectionConfig:
     # Gate A: reject cascade hits whose identity's finish_time is more
     #         than this many seconds from the photo's corrected_time.
     FL_CASCADE_TIMING_GATE_S: float = 10.0
-    # Gate B: skip cascade entirely when the tracklet's best face
+    # Gate B: skip cascade entirely when the cluster's best face
     #         quality is below this floor (low-quality = unreliable).
     FL_CASCADE_MIN_FACE_QUALITY: float = 0.80
 
     # Gate C: use bipartite graph matching (Hungarian algorithm) instead
     # of the greedy sequential cascade for finish-line identity resolution.
-    # When True, all tracklet-to-hint assignments are optimised globally
+    # When True, all cluster-to-hint assignments are optimised globally
     # via a cost matrix, eliminating first-claim ordering bias.
     FL_USE_BIPARTITE: bool = True
 

@@ -179,8 +179,7 @@ def suppress_overlapping_persons(persons, iou_thresh=NMS_IOU_THRESH,
       * containment >= contain_thresh (smaller box nested inside larger).
 
     The lower-confidence detection is suppressed.  Works on any object
-    with ``.bbox`` and ``.confidence`` attributes (PersonDetection,
-    TrackletDetection, etc.).
+    with ``.bbox`` and ``.confidence`` attributes (PersonDetection, etc.).
 
     Returns a new list with duplicates removed.
     """

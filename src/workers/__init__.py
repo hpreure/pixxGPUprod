@@ -10,7 +10,7 @@ Modules:
 - scribe_publisher:         Async DB-write queue publisher
 - probe_calibration:        Camera time offset calculation
 - asymmetric_gpu_worker:    Tier 1 — raw GPU inference, no DB
-- cpu_worker:               Tier 2 — tracklet assembly, identity resolution
+- cpu_worker:               Tier 2 — identity clustering, identity resolution
 - db_scribe:                Tier 3 — async DB writer + VPS notifier
 """
 

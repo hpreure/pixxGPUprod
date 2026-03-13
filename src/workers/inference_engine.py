@@ -62,8 +62,8 @@ class PersonDetection:
     # 0.0 is a valid score meaning the crop is perfectly flat/uniform.
     blur_score: float = 0.0
     # True when blur_score is below BLUR_THRESHOLD.  Soft quality flag:
-    # excluded from OCR voting and biometric blending in the tracklet
-    # pipeline, but the detection is kept for tracklet continuity and
+    # excluded from OCR voting and biometric blending in the clustering
+    # pipeline, but the detection is kept for cluster continuity and
     # still goes through the full GPU pipeline (face, ReID, bib).
     is_blurry: bool = False
     bibs: List[BibDetection] = None

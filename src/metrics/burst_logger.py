@@ -62,9 +62,9 @@ def log_burst_metrics(
     batch_size_persons: int = 0,
     images_per_second: float = 0.0,
     # ── Bib Tagging / Accuracy ────────────────────────────────
-    tracklets_total: int = 0,
-    tracklets_matched: int = 0,
-    tracklets_ghosts: int = 0,
+    clusters_total: int = 0,
+    clusters_matched: int = 0,
+    clusters_ghosts: int = 0,
     match_type_distribution: Optional[Dict[str, int]] = None,
     avg_ocr_confidence: float = 0.0,
     # ── Stability ─────────────────────────────────────────────
@@ -97,9 +97,9 @@ def log_burst_metrics(
         batch_size_persons=batch_size_persons,
         images_per_second=round(images_per_second, 2),
         # Accuracy
-        tracklets_total=tracklets_total,
-        tracklets_matched=tracklets_matched,
-        tracklets_ghosts=tracklets_ghosts,
+        clusters_total=clusters_total,
+        clusters_matched=clusters_matched,
+        clusters_ghosts=clusters_ghosts,
         match_type_distribution=match_type_distribution or {},
         avg_ocr_confidence=round(avg_ocr_confidence, 4),
         # Stability
