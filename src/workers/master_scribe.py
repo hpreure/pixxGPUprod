@@ -349,11 +349,19 @@ class MasterScribe:
                 if assigned_bib is not None:
                     # Known-bib identity: upsert + EMA blend centroids
                     bibs_to_adopt.add(assigned_bib)
-                    identity_id = db.enroll_identity(
+                    identity_id, released_ghost = db.enroll_identity(
                         cur, project_id, assigned_bib,
                         face_vec=face_vec, reid_vec=reid_vec,
                         enrollment_type=match_type,
                     )
+                    if released_ghost is not None:
+                        # A rank override released old subjects to a ghost.
+                        # The adoption sweep (step 6) will attempt to match
+                        # the released ghost to a different confirmed bib.
+                        logger.info("rank_override_ghost_released",
+                            bib=assigned_bib, ghost_id=released_ghost,
+                            incoming_type=match_type,
+                        )
                 else:
                     # Ghost identity: no bib, always creates a new row
                     identity_id = db.ensure_identity(

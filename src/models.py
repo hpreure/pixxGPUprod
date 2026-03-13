@@ -177,7 +177,24 @@ class InsightFaceWrapper:
             logger.error(f"FATAL: Failed to load InsightFace on GPU: {e}")
             raise
     
-    def extract_batch(self, crops: List[np.ndarray]) -> List[dict]:
+    @staticmethod
+    def _face_mask_overlap(face, mask: np.ndarray) -> float:
+        """Fraction of the face bbox area that overlaps the person seg mask."""
+        fx1, fy1, fx2, fy2 = (int(round(v)) for v in face.bbox[:4])
+        h, w = mask.shape[:2]
+        fx1, fy1 = max(0, fx1), max(0, fy1)
+        fx2, fy2 = min(w, fx2), min(h, fy2)
+        if fx2 <= fx1 or fy2 <= fy1:
+            return 0.0
+        region = mask[fy1:fy2, fx1:fx2]
+        face_area = (fy2 - fy1) * (fx2 - fx1)
+        return float(region.sum()) / face_area if face_area > 0 else 0.0
+
+    def extract_batch(
+        self,
+        crops: List[np.ndarray],
+        seg_masks: Optional[List[Optional[np.ndarray]]] = None,
+    ) -> List[dict]:
         """
         Batched face extraction - processes all crops efficiently.
         
@@ -190,6 +207,10 @@ class InsightFaceWrapper:
         
         Args:
             crops: List of person crop images (BGR, numpy arrays)
+            seg_masks: Optional list of binary masks (same H×W as each crop).
+                       When provided for a multi-face crop, the face with the
+                       highest mask overlap ratio is selected instead of the
+                       largest face.  This eliminates background-person faces.
         
         Returns:
             List of dicts with 'embedding', 'landmarks', 'quality', 'bbox' keys
@@ -197,6 +218,8 @@ class InsightFaceWrapper:
         if not crops:
             return []
         
+        _MIN_OVERLAP = 0.25  # reject face if best overlap is below this
+
         # Results placeholder (maintains order)
         results = [None] * len(crops)
         
@@ -214,19 +237,44 @@ class InsightFaceWrapper:
                 faces = self.app.get(crop)
                 
                 if faces:
-                    # Pick the largest face by bbox area — in a person crop,
-                    # the primary subject is closest to camera and therefore
-                    # has the largest face.  This prevents background faces
-                    # (inside wide bounding boxes) from stealing identity.
-                    if len(faces) > 1:
+                    mask_i = seg_masks[i] if seg_masks and i < len(seg_masks) else None
+
+                    if len(faces) == 1:
+                        best_face = faces[0]
+                    elif mask_i is not None:
+                        # ── Seg-mask overlap selection (Option C) ─────────
+                        # Score each face by the fraction of its bbox that
+                        # falls on mask=1 pixels (this person's instance).
+                        scored = [(f, self._face_mask_overlap(f, mask_i)) for f in faces]
+                        scored.sort(key=lambda t: t[1], reverse=True)
+                        best_face, best_overlap = scored[0]
+
+                        if best_overlap < _MIN_OVERLAP:
+                            # No face convincingly belongs to this person —
+                            # treat as faceless to avoid contamination.
+                            logger.info("multi_face_all_off_mask", extra={
+                                "crop_idx": i,
+                                "face_count": len(faces),
+                                "best_overlap": round(best_overlap, 3),
+                            })
+                            results[i] = self._empty_result()
+                            continue
+
+                        logger.debug("multi_face_mask_select", extra={
+                            "crop_idx": i,
+                            "face_count": len(faces),
+                            "best_overlap": round(best_overlap, 3),
+                            "runner_up_overlap": round(scored[1][1], 3) if len(scored) > 1 else 0.0,
+                        })
+                    else:
+                        # Fallback: no mask available — use area (legacy)
                         best_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
                         logger.debug("multi_face_in_crop", extra={
                             "crop_idx": i,
                             "face_count": len(faces),
                             "selected_area": round(float((best_face.bbox[2] - best_face.bbox[0]) * (best_face.bbox[3] - best_face.bbox[1])), 1),
                         })
-                    else:
-                        best_face = faces[0]
+
                     face_indices.append(i)
                     detected_faces.append(best_face)
                 else:
@@ -256,18 +304,23 @@ class InsightFaceWrapper:
         
         return results
     
-    def extract(self, face_crops: List[np.ndarray]) -> List[dict]:
+    def extract(
+        self,
+        face_crops: List[np.ndarray],
+        seg_masks: Optional[List[Optional[np.ndarray]]] = None,
+    ) -> List[dict]:
         """
         Extract face embeddings and landmarks.
         
         Args:
             face_crops: List of face crop images (BGR, numpy arrays)
+            seg_masks: Optional per-crop binary masks for face ownership filtering.
         
         Returns:
             List of dicts with 'embedding', 'landmarks', 'quality' keys
         """
         # Delegate to optimized batch method
-        return self.extract_batch(face_crops)
+        return self.extract_batch(face_crops, seg_masks=seg_masks)
     
     def _empty_result(self) -> dict:
         """Return empty result dict for faces not detected."""

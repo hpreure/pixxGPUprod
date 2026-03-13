@@ -374,7 +374,7 @@ class DetectionConfig:
 
     CASCADE_FACE_STRICT: float = 0.75
     CASCADE_REID_STRONG: float = 0.90
-    CASCADE_FACE_SOFT: float = 0.40
+    CASCADE_FACE_SOFT: float = 0.60
     CASCADE_SOLO_FACE: float = 0.60
     CASCADE_SOLO_REID: float = 0.88
 

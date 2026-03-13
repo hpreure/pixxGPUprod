@@ -525,7 +525,18 @@ class InferenceEngine:
         if self.face_model is not None and capped_survivors:
             try:
                 face_crops = [s[6] for s in capped_survivors]  # raw_crop
-                face_results = self.face_model.extract(face_crops)
+                # Build per-crop seg masks so InsightFace can use mask-overlap
+                # to pick the correct face when multiple faces are detected.
+                face_seg_masks: List[Optional[np.ndarray]] = []
+                for s in capped_survivors:
+                    img_i, x1, y1, x2, y2 = s[0], s[1], s[2], s[3], s[4]
+                    full_mask = s[7]  # seg_mask in full-image coords
+                    if full_mask is not None:
+                        crop_mask = full_mask[y1:y2, x1:x2]
+                        face_seg_masks.append(crop_mask)
+                    else:
+                        face_seg_masks.append(None)
+                face_results = self.face_model.extract(face_crops, seg_masks=face_seg_masks)
                 for i, fr in enumerate(face_results):
                     if fr and fr.get('embedding') is not None:
                         all_face_pre[i] = fr
