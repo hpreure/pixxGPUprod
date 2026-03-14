@@ -6,7 +6,7 @@ Tier 1 of the pixxEngine Asymmetric Detection Pipeline.
 This worker is strictly responsible for AI tensor math and nothing else.
 It consumes *tickets* from the local ``gpu_tasks`` queue (published by
 the Image Feeder), reads pre-fetched images from ``/dev/shm``, runs
-GPU inference (YOLO, PARSeq, DINOv2, InsightFace), publishes raw
+GPU inference (YOLO, PARSeq, TransReID, InsightFace), publishes raw
 results, and **deletes the images from RAM** when done.
 
 Claim-Check Architecture::
@@ -22,7 +22,7 @@ Strict Separation of Concerns
  GPU Worker (this file):
    - Consumes tickets from the **local** ``gpu_tasks`` queue.
    - Reads images from ``/dev/shm`` (RAM) — zero network I/O.
-   - Runs YOLO person detection, bib/text YOLO, PARSeq OCR, DINOv2 ReID,
+   - Runs YOLO person detection, bib/text YOLO, PARSeq OCR, TransReID ReID,
      and InsightFace facial recognition (profile-dependent).
    - Handles both ``bib_detection`` and ``probe_calibration`` task types.
    - Fernet-encrypts biometric vectors for safe queue transport.
@@ -41,7 +41,7 @@ Priority Rules
 --------------
  ``priority == 9``  →  Finish-line burst → ``PROFILE_FULL``
    Pipeline: YOLO26 Person → YOLO26 Bib → YOLO26 Numbers → PARSeq OCR
-             → DINOv2 ReID → InsightFace Face
+             → TransReID ReID → InsightFace Face
 
  ``priority == 10`` →  Calibration shot → routed to ``scribe_tasks`` (bypass CPU).
 
@@ -347,7 +347,7 @@ def process_burst(
 
     Priority logic:
       Both finish-line (priority 9) and course-side (priority < 9)
-      use ``PROFILE_FULL`` so that all models (YOLO, DINOv2 ReID,
+      use ``PROFILE_FULL`` so that all models (YOLO, TransReID ReID,
       InsightFace, PARSeq OCR) run on every bib_detection burst.
       ``PROFILE_PROBE`` is reserved for ``probe_calibration`` tasks.
 

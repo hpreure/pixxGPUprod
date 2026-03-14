@@ -6,7 +6,7 @@ Wrappers for active AI models used by the inference pipeline:
   - ParseqWrapper       — OCR (PARSeq NAR, TRT FP16)
 
 Removed: TransReIDWrapper (OSNet/ResNet50 legacy ReID).
-ReID is now handled exclusively by src/reid_wrapper.py (DINOv2 TRT FP16).
+ReID is now handled exclusively by src/reid_wrapper.py (TransReID TRT FP16).
 """
 
 import torch
@@ -22,7 +22,7 @@ from src.detection_config import settings
 logger = logging.getLogger(__name__)
 
 # NOTE: TransReIDWrapper (OSNet/ResNet50 legacy ReID) was removed.
-# The pipeline exclusively uses DINOv2 TRT FP16 via src/reid_wrapper.py (ReIDWrapper).
+# The pipeline exclusively uses TransReID TRT FP16 via src/reid_wrapper.py (ReIDWrapper).
 
 
 class InsightFaceWrapper:

@@ -318,7 +318,7 @@ class InferenceEngine:
 
         Profiles:
           - 'probe': YOLO person/bib/text + PARSeq OCR  (probe calibration)
-          - 'full':  All of the above + DINOv2 ReID + InsightFace  (bib_detection)
+          - 'full':  All of the above + TransReID ReID + InsightFace  (bib_detection)
         """
         if self._loaded_profile == PROFILE_FULL:
             return
@@ -349,7 +349,7 @@ class InferenceEngine:
 
         if profile == PROFILE_FULL:
             if self.reid_model is None:
-                logger.info("model_loading", model="DINOv2")
+                logger.info("model_loading", model="TransReID")
                 self.reid_model = ReIDWrapper(device=self.device)
                 if "cuda" in self.device:
                     self.reid_model.half()
@@ -377,7 +377,7 @@ class InferenceEngine:
           3. Per-image cap (MAX_PERSONS_PER_IMAGE, by conf × area)
           4. Batched Face extraction (capped survivors only)
           5. Faceless rejection
-          6. Batched ReID extraction (survivors only → one DINOv2 call)
+          6. Batched ReID extraction (survivors only → one TransReID call)
           7. Batched bib detection + text + OCR (survivors only)
         """
         if not self.models_loaded:
