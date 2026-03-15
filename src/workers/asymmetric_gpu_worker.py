@@ -243,6 +243,7 @@ def _serialise_person(person: PersonDetection) -> dict:
         "blur_score":       round(float(person.blur_score), 2),
         "is_blurry":        bool(person.is_blurry),
         "face_quality":     round(float(person.face_quality), 4),
+        "face_yaw":         round(float(person.face_yaw), 2),
         "reid_vector_b64":  _encrypt_biometric_vector(person.reid_vector),
         "face_vector_b64":  _encrypt_biometric_vector(person.face_vector),
         "bib_number":       best_bib,

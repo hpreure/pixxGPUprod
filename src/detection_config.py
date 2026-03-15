@@ -281,8 +281,8 @@ class DetectionConfig:
     #   Step 1 — Ambiguous Partial Pre-Filter (multi-hint substring)
     #   Step 2 — Hard Veto (conflicting OCR → skip)
     #   Step 3 — Hint Disambiguation Veto (co-present bibs)
-    #   Step 4 — Hard Anchor (compatible OCR → merge)
-    #   Step 5 — Biometric Gravitation (face cosine ≥ FACE_MODERATE_SIM)
+    #   Step 4 — Biometric Gravitation (face ≥ 0.40 AND reid ≥ 0.80)
+    #   Step 5 — OCR Anchor fallback (compatible OCR, hostile-bio veto)
     #
     # Rule 13 (Concurrent Frame Veto): crops from the same photo_id
     # can never merge into the same cluster.
@@ -317,8 +317,23 @@ class DetectionConfig:
 
     # Moderate face match: same person probable but not certain.
     # Awards FACE_MODERATE_BONUS (< strong, > linear fallback).
-    FACE_MODERATE_SIM: float = 0.45
+    FACE_MODERATE_SIM: float = 0.40
     FACE_MODERATE_BONUS: float = 0.7
+
+    # ── In-Burst ReID Gate ────────────────────────────────────────
+    # Minimum ReID cosine similarity for biometric gravitation in
+    # in-burst clustering.  Step 4 now requires BOTH face >= 0.40
+    # AND reid >= 0.80 to merge — neither alone is sufficient.
+    CLUSTER_REID_MIN: float = 0.80
+
+    # ── OCR Anchor Hostile-Biometric Cross-Check ──────────────────
+    # When biometric gravitation (step 4) fails but OCR is compatible
+    # (step 5), block the OCR merge if both face AND reid are below
+    # these floors — indicating clearly different people sharing a
+    # partial bib reading (e.g. "382" matching both 3802 and 3821).
+    # Deliberately permissive: only vetoes obvious mismatches.
+    OCR_ANCHOR_HOSTILE_FACE: float = 0.15
+    OCR_ANCHOR_HOSTILE_REID: float = 0.40
 
     # Below FACE_CONFLICT_SIM the faces are clearly different people.
     # Applies FACE_CONFLICT_PENALTY to discourage linking.
@@ -344,10 +359,15 @@ class DetectionConfig:
     # identity_matcher.py modules share these same thresholds.
 
     CASCADE_FACE_STRICT: float = 0.75
-    CASCADE_REID_STRONG: float = 0.90
+    CASCADE_REID_STRONG: float = 0.85
     CASCADE_FACE_SOFT: float = 0.60
     CASCADE_SOLO_FACE: float = 0.60
     CASCADE_SOLO_REID: float = 0.88
+
+    # Path 3: strong ReID confirmed by moderate face — catches
+    # ghosts where face-strict fails due to cross-angle variance.
+    CASCADE_REID_SOLO: float = 0.88
+    CASCADE_REID_SOLO_FACE: float = 0.60
 
     # Hint-biometric guardrails — require BOTH face AND reid to agree
     # before attributing a bibless cluster to a timing hint.  The old

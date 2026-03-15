@@ -118,7 +118,7 @@ class CropDetection:
 
     __slots__ = (
         "frame_idx", "photo_id", "bbox", "confidence", "is_blurry",
-        "face_quality", "bibs", "img_width", "img_height",
+        "face_quality", "face_yaw", "bibs", "img_width", "img_height",
         "face_vector_b64", "reid_vector_b64",
         "face_vector", "reid_vector", "_had_face",
     )
@@ -131,6 +131,7 @@ class CropDetection:
         self.confidence = person_data["confidence"]
         self.is_blurry = person_data.get("is_blurry", False)
         self.face_quality = person_data.get("face_quality", 0.0)
+        self.face_yaw = person_data.get("face_yaw", 0.0)
         self.bibs = person_data.get("bibs", [])
         self.img_width = img_width
         self.img_height = img_height
@@ -184,6 +185,7 @@ class IdentityCluster:
         self.consensus_conf: float = 0.0
         self.best_face_vec: Optional[np.ndarray] = None
         self.best_face_quality: float = 0.0
+        self.best_face_yaw: float = 0.0
         self.blended_reid_vec: Optional[np.ndarray] = None
 
         # Assignment (set by the deterministic cascade)
@@ -237,11 +239,12 @@ class IdentityCluster:
             self.consensus_conf = 0.0
 
         # ── Best face (pick highest quality) ──────────────────────
-        faces = [(d.face_vector, d.face_quality) for d in valid if d.face_vector is not None]
+        faces = [(d.face_vector, d.face_quality, d.face_yaw) for d in valid if d.face_vector is not None]
         if faces:
             best = max(faces, key=lambda x: x[1])
             self.best_face_vec = best[0]
             self.best_face_quality = best[1]
+            self.best_face_yaw = best[2]
 
         # ── Blended ReID (mean, L2-normalised) ────────────────────
         reids = [d.reid_vector for d in valid if d.reid_vector is not None]
@@ -256,18 +259,34 @@ class IdentityCluster:
         """True if the cluster has at least one usable biometric vector."""
         return self.best_face_vec is not None or self.blended_reid_vec is not None
 
-    def has_multiple_conflicting_high_conf_bibs(self) -> bool:
-        """True if the cluster contains high-conf OCR for 2+ incompatible bibs."""
-        high_bibs: Set[str] = set()
+    def has_multiple_conflicting_high_conf_bibs(
+        self, valid_bibs: set = frozenset(),
+    ) -> bool:
+        """True if the cluster has 2+ incompatible *valid* best-bibs.
+
+        Only the single best bib per crop is considered (highest OCR
+        confidence).  Secondary detections (e.g. a neighbouring
+        runner's bib leaking into the person crop) are ignored.
+
+        Compatible partial reads (e.g. 1820 / 182 / 820) do NOT
+        trigger a conflict — ``bib_is_compatible`` handles occlusion,
+        substring, and Hamming-1 tolerance.
+
+        A bib must appear in *valid_bibs* to participate in the
+        conflict check.  Non-participant OCR hallucinations (numbers
+        not in the race) are irrelevant noise.
+        """
+        best_bibs: Set[str] = set()
         for d in self.detections:
-            for b in d.bibs:
-                if b.get("ocr_confidence", 0.0) >= _cfg.MIN_OCR_CONF:
-                    bn = b.get("bib_number")
-                    if bn and len(bn) >= _cfg.MIN_BIB_DIGITS:
-                        high_bibs.add(bn)
-        if len(high_bibs) < 2:
+            bib, conf = d.best_bib
+            if bib and conf >= _cfg.MIN_OCR_CONF:
+                best_bibs.add(bib)
+        # Keep only valid bibs (registered participants with finish times)
+        if valid_bibs:
+            best_bibs = {b for b in best_bibs if b in valid_bibs}
+        if len(best_bibs) < 2:
             return False
-        bibs = list(high_bibs)
+        bibs = list(best_bibs)
         for i in range(len(bibs)):
             for j in range(i + 1, len(bibs)):
                 if not db.bib_is_compatible(bibs[i], bibs[j]):
@@ -335,10 +354,13 @@ def cluster_burst_detections(
          they are physically co-present on the mat → treat as conflict.
          STRICTLY hints-only to avoid fracturing clusters over typos
          of runners who finished hours apart.
-      4. **Hard Anchor** — if both have OCR and the bibs are compatible, merge.
-      5. **Biometric Gravitation** — when OCR doesn't resolve the decision
-         (at least one side lacks OCR), merge if face cosine similarity
-         >= FACE_MODERATE_SIM.
+      4. **Biometric Gravitation (PRIMARY)** — merge if face cosine
+         similarity >= FACE_MODERATE_SIM AND reid >= CLUSTER_REID_MIN.
+         Biometrics decide identity; OCR is not consulted.
+      5. **OCR Anchor (FALLBACK)** — if biometrics didn't match but
+         OCR is compatible, merge UNLESS both face AND reid are below
+         hostile thresholds (clearly different people sharing a partial
+         bib reading).
 
     Rule 13 (Concurrent Frame Veto): crops from the same photo_id
     can never merge into the same cluster.
@@ -413,16 +435,37 @@ def cluster_burst_detections(
                             and cluster.consensus_bib in _hints):
                         continue
 
-                    # ── 4. Hard Anchor ──
-                    if ocr_match:
-                        matched_cluster = cluster
-                        break
-
-                    # ── 5. Biometric Gravitation ──
+                    # ── 4. Biometric Gravitation (PRIMARY — dual-gate) ──
+                    # Both face AND ReID must agree to merge.
                     if (crop.face_vector is not None
                             and cluster.best_face_vec is not None):
-                        sim = _reid_cosine(crop.face_vector, cluster.best_face_vec)
-                        if sim >= _cfg.FACE_MODERATE_SIM:
+                        face_sim = _reid_cosine(crop.face_vector, cluster.best_face_vec)
+                        reid_sim = 0.0
+                        if (crop.reid_vector is not None
+                                and cluster.blended_reid_vec is not None):
+                            reid_sim = _reid_cosine(crop.reid_vector, cluster.blended_reid_vec)
+                        if face_sim >= _cfg.FACE_MODERATE_SIM and reid_sim >= _cfg.CLUSTER_REID_MIN:
+                            matched_cluster = cluster
+                            break
+
+                    # ── 5. OCR Anchor (FALLBACK — compatible OCR) ──
+                    # Only fires when biometric gravitation did not
+                    # match (vectors missing or below dual-gate).
+                    # Cross-check: if both sides HAVE vectors but
+                    # biometrics are actively hostile (clearly
+                    # different people), block the OCR merge.
+                    if ocr_match:
+                        bio_hostile = False
+                        if (crop.face_vector is not None
+                                and cluster.best_face_vec is not None):
+                            ck_face = _reid_cosine(crop.face_vector, cluster.best_face_vec)
+                            ck_reid = 0.0
+                            if (crop.reid_vector is not None
+                                    and cluster.blended_reid_vec is not None):
+                                ck_reid = _reid_cosine(crop.reid_vector, cluster.blended_reid_vec)
+                            if ck_face < _cfg.OCR_ANCHOR_HOSTILE_FACE and ck_reid < _cfg.OCR_ANCHOR_HOSTILE_REID:
+                                bio_hostile = True
+                        if not bio_hostile:
                             matched_cluster = cluster
                             break
 
@@ -490,7 +533,7 @@ def run_cascade(
 
     for c in list(unassigned):
         # ── Rule 11: Multi-Bib Collision ──────────────────────────
-        if c.has_multiple_conflicting_high_conf_bibs():
+        if c.has_multiple_conflicting_high_conf_bibs(valid_bibs):
             c.assign(None, "ghost_multi_bib")
             unassigned.remove(c)
             continue

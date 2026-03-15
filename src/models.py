@@ -295,11 +295,21 @@ class InsightFaceWrapper:
             if embedding_norm > 0:
                 embedding = embedding / embedding_norm  # Unit vector
             
+            # Extract head-pose yaw for angle-bucketed face centroids.
+            # InsightFace returns pose as [yaw, pitch, roll] in degrees.
+            face_yaw = 0.0
+            if hasattr(face, 'pose') and face.pose is not None:
+                try:
+                    face_yaw = float(face.pose[0])
+                except (IndexError, TypeError):
+                    face_yaw = 0.0
+
             results[idx] = {
                 'embedding': embedding,  # 512-dim L2-normalized vector
                 'landmarks': face.landmark_2d_106 if hasattr(face, 'landmark_2d_106') else None,
                 'quality': float(face.det_score),
                 'bbox': face.bbox.tolist() if hasattr(face, 'bbox') else None,
+                'face_yaw': face_yaw,
             }
         
         return results
@@ -329,6 +339,7 @@ class InsightFaceWrapper:
             'landmarks': None,
             'quality': 0.0,
             'bbox': None,
+            'face_yaw': 0.0,
         }
     
     def half(self):

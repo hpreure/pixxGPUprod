@@ -57,6 +57,7 @@ class PersonDetection:
     reid_vector: Optional[np.ndarray] = None
     face_vector: Optional[np.ndarray] = None
     face_quality: float = 0.0
+    face_yaw: float = 0.0
     # Laplacian variance of the grayscale crop — proxy for sharpness.
     # Computed in the engine immediately after crop extraction (pass 2).
     # 0.0 is a valid score meaning the crop is perfectly flat/uniform.
@@ -628,6 +629,7 @@ class InferenceEngine:
 
             face_vec     = face_data['embedding']       if face_data else None
             face_quality = face_data.get('quality', 0.0) if face_data else 0.0
+            face_yaw     = face_data.get('face_yaw', 0.0) if face_data else 0.0
 
             # Debug: log bbox ↔ bib pairing so crossing bugs can be diagnosed.
             if bibs:
@@ -643,6 +645,7 @@ class InferenceEngine:
                 reid_vector=reid_vec,
                 face_vector=face_vec,
                 face_quality=face_quality,
+                face_yaw=face_yaw,
                 blur_score=blur_score,
                 is_blurry=is_blurry,
                 bibs=bibs,
@@ -756,26 +759,49 @@ class InferenceEngine:
         bib_crops = []
         bib_crops_info = []  # (person_idx, bib_box_xyxy)
 
+        # Group raw bib detections per person crop so we can pick the
+        # best-overlapping bib when multiple are detected.
+        per_crop_bibs: Dict[int, list] = {}   # pi → [(x1_640, y1_640, x2_640, y2_640, orig_xyxy)]
         for pi, det_result in enumerate(bib_batch_results):
             if det_result is None or det_result.boxes is None:
                 continue
             for bib_box in det_result.boxes:
                 x1, y1, x2, y2 = map(int, bib_box.xyxy[0].cpu().numpy())
-                # Map bib coords from 640×640 squash space → original crop pixels
-                # so BibDetection.bbox is in the same coord space as person bbox.
                 orig_x1 = int(x1 * crop_scales_x[pi])
                 orig_y1 = int(y1 * crop_scales_y[pi])
                 orig_x2 = int(x2 * crop_scales_x[pi])
                 orig_y2 = int(y2 * crop_scales_y[pi])
-                
-                # Verify that the bib belongs to THIS person using the seg_mask.
-                # However, if crop_mask logic is rejecting valid foreground bibs 
-                # (due to the segmentation model excluding the physical bib square as non-human),
-                # we must comment this out. As per user feedback, two people were well separated 
-                # and OCR is incorrectly placed. The masking bit was strictly for ReID.
-                # 
-                # Removing mask verification loop logic:
+                per_crop_bibs.setdefault(pi, []).append(
+                    (x1, y1, x2, y2, (orig_x1, orig_y1, orig_x2, orig_y2))
+                )
 
+        for pi, candidates in per_crop_bibs.items():
+            # If multiple bib detections in one crop, use the seg mask to
+            # pick the one that overlaps most with this person's silhouette.
+            # A neighbouring runner's bib will fall outside the mask.
+            if len(candidates) > 1 and crop_masks and crop_masks[pi] is not None:
+                mask = crop_masks[pi]
+                scored = []
+                for (bx1, by1, bx2, by2, orig_xyxy) in candidates:
+                    ox1, oy1, ox2, oy2 = orig_xyxy
+                    # Clamp to mask bounds
+                    mh, mw = mask.shape[:2]
+                    mx1 = max(0, min(ox1, mw - 1))
+                    my1 = max(0, min(oy1, mh - 1))
+                    mx2 = max(0, min(ox2, mw))
+                    my2 = max(0, min(oy2, mh))
+                    if mx2 <= mx1 or my2 <= my1:
+                        scored.append((0.0, bx1, by1, bx2, by2, orig_xyxy))
+                        continue
+                    region = mask[my1:my2, mx1:mx2]
+                    total_pixels = region.size
+                    overlap = float(region.sum()) / total_pixels if total_pixels > 0 else 0.0
+                    scored.append((overlap, bx1, by1, bx2, by2, orig_xyxy))
+                # Keep only the best-overlapping bib
+                scored.sort(key=lambda s: s[0], reverse=True)
+                candidates = [(s[1], s[2], s[3], s[4], s[5]) for s in scored[:1]]
+
+            for (x1, y1, x2, y2, orig_xyxy) in candidates:
                 # Pad bib box to capture clipped leading/trailing digits
                 bw = x2 - x1
                 pad = int(bw * BIB_CROP_PAD_FRAC)
@@ -785,8 +811,7 @@ class InferenceEngine:
                     continue
                 bib_crop = resized_crops[pi][y1:y2, x1:x2].copy()
                 bib_crops.append(bib_crop)
-                # Store original-crop coordinates for BibDetection bbox
-                bib_crops_info.append((pi, (orig_x1, orig_y1, orig_x2, orig_y2)))
+                bib_crops_info.append((pi, orig_xyxy))
 
         if not bib_crops:
             return result_bibs

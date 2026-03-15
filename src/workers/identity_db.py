@@ -193,6 +193,9 @@ def _cosine_sim(a_vec, b_vec) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
+
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Photo CRUD  (pipeline.photos)
 # ═══════════════════════════════════════════════════════════════════
@@ -367,67 +370,69 @@ def enroll_identity(cur, project_id: str, bib: str,
     # Blend biometric vectors if provided
     released_ghost_id = None
     if face_vec is not None or reid_vec is not None:
-        # ── Enrollment similarity gate ────────────────────────────
-        # Always check biometric similarity before blending.  Prevents
-        # centroid poisoning when a wrong person is assigned the same bib.
-        # Uses face similarity with ReID fallback when face is unavailable.
-        has_existing = (existing_face_pg is not None or existing_reid_pg is not None)
-        has_incoming = (face_vec is not None or reid_vec is not None)
-        if has_existing and has_incoming and sighting_count >= 2:
-            sim = _biometric_sim(face_vec, existing_face_pg,
-                                 reid_vec, existing_reid_pg)
-            if sim < _cfg.ENROLLMENT_MIN_SIM:
-                incoming_rank = _ENROLL_RANK.get(enrollment_type, 8)
-                existing_rank = _ENROLL_RANK.get(existing_enrollment, 8)
+        incoming_rank = _ENROLL_RANK.get(enrollment_type, 8)
+        existing_rank = _ENROLL_RANK.get(existing_enrollment, 8)
 
-                if incoming_rank < existing_rank:
-                    # Higher-confidence type overrides a lower one:
-                    # replace the centroid entirely instead of blending.
-                    logger.warning(
-                        "enrollment_rank_override bib=%s sim=%.3f "
-                        "incoming=%s(rank=%d) existing=%s(rank=%d) "
-                        "sightings=%d → replacing centroid + ghost release",
-                        bib, sim, enrollment_type, incoming_rank,
-                        existing_enrollment, existing_rank, sighting_count,
-                    )
-                    # Release old subjects to a ghost with the OLD centroid
-                    released_ghost_id = release_subjects_to_ghost(
-                        cur, rid, project_id,
-                        incoming_rank,
-                        existing_face_pg, existing_reid_pg,
-                    )
-                    cur.execute("""
-                        UPDATE pipeline.identities SET
-                            face_centroid  = COALESCE(%s::vector, face_centroid),
-                            reid_centroid  = COALESCE(%s::vector, reid_centroid),
-                            enrollment_type = %s,
-                            sighting_count = 2,
-                            updated_at     = now()
-                        WHERE id = %s
-                    """, (_vec_to_pg(face_vec), _vec_to_pg(reid_vec),
-                          enrollment_type, rid))
-                    return (rid, released_ghost_id)
-                else:
-                    # Lower or equal confidence — divert subjects to a
-                    # ghost so they don't contaminate the confirmed identity.
-                    logger.warning(
-                        "enrollment_blend_rejected_to_ghost bib=%s sim=%.3f "
-                        "threshold=%.2f incoming=%s existing=%s "
-                        "sightings=%d → diverting to ghost",
-                        bib, sim, _cfg.ENROLLMENT_MIN_SIM,
-                        enrollment_type, existing_enrollment,
-                        sighting_count,
-                    )
-                    ghost_id = str(uuid.uuid4())
-                    cur.execute("""
-                        INSERT INTO pipeline.identities
-                            (id, project_id, bib, face_centroid,
-                             reid_centroid, enrollment_type)
-                        VALUES (%s, %s, NULL, %s::vector,
-                                %s::vector, 'ghost')
-                    """, (ghost_id, project_id,
-                          _vec_to_pg(face_vec), _vec_to_pg(reid_vec)))
-                    return (ghost_id, None)
+        has_existing = (existing_face_pg is not None
+                        or existing_reid_pg is not None)
+        has_incoming = (face_vec is not None or reid_vec is not None)
+
+        if has_existing and has_incoming and sighting_count >= 2:
+            face_sim = _cosine_sim(face_vec, existing_face_pg)
+            reid_sim = _cosine_sim(reid_vec, existing_reid_pg)
+            sim = face_sim if face_sim > 0 else reid_sim
+
+            # ── Rank override ─────────────────────────────────────
+            # A higher-priority enrollment always replaces a lower-
+            # priority one.  The old subjects are released to a ghost
+            # and can be ghost-adopted back if biometrics truly match.
+            if incoming_rank < existing_rank:
+                logger.info(
+                    "enrollment_rank_override bib=%s sim=%.3f "
+                    "incoming=%s(rank=%d) existing=%s(rank=%d) "
+                    "sightings=%d → replacing centroid + ghost release",
+                    bib, sim, enrollment_type, incoming_rank,
+                    existing_enrollment, existing_rank, sighting_count,
+                )
+                released_ghost_id = release_subjects_to_ghost(
+                    cur, rid, project_id,
+                    incoming_rank,
+                    existing_face_pg, existing_reid_pg,
+                )
+                cur.execute("""
+                    UPDATE pipeline.identities SET
+                        face_centroid   = %s::vector,
+                        reid_centroid   = COALESCE(%s::vector, reid_centroid),
+                        enrollment_type = %s,
+                        sighting_count  = 2,
+                        updated_at      = now()
+                    WHERE id = %s
+                """, (_vec_to_pg(face_vec),
+                      _vec_to_pg(reid_vec),
+                      enrollment_type, rid))
+                return (rid, released_ghost_id)
+
+            # ── Similarity gate ───────────────────────────────────
+            # Same or lower rank: reject blend if biometrics diverge.
+            if sim < _cfg.ENROLLMENT_MIN_SIM:
+                logger.warning(
+                    "enrollment_blend_rejected_to_ghost bib=%s sim=%.3f "
+                    "threshold=%.2f incoming=%s existing=%s "
+                    "sightings=%d → diverting to ghost",
+                    bib, sim, _cfg.ENROLLMENT_MIN_SIM,
+                    enrollment_type, existing_enrollment,
+                    sighting_count,
+                )
+                ghost_id = str(uuid.uuid4())
+                cur.execute("""
+                    INSERT INTO pipeline.identities
+                        (id, project_id, bib, face_centroid,
+                         reid_centroid, enrollment_type)
+                    VALUES (%s, %s, NULL, %s::vector,
+                            %s::vector, 'ghost')
+                """, (ghost_id, project_id,
+                      _vec_to_pg(face_vec), _vec_to_pg(reid_vec)))
+                return (ghost_id, None)
 
         shard_created = _update_or_create_shard(
             cur, rid, face_vec, reid_vec,
@@ -435,33 +440,28 @@ def enroll_identity(cur, project_id: str, bib: str,
             sighting_count,
         )
 
-        # ── Promote enrollment_type if incoming has better rank ──
-        incoming_rank = _ENROLL_RANK.get(enrollment_type, 8)
-        existing_rank = _ENROLL_RANK.get(existing_enrollment, 8)
         promoted_type = enrollment_type if incoming_rank < existing_rank else None
 
         if not shard_created:
             new_face = _blend(existing_face_pg, face_vec)
             new_reid = _blend(existing_reid_pg, reid_vec)
+            set_clauses = [
+                "face_centroid = COALESCE(%s::vector, face_centroid)",
+                "reid_centroid = COALESCE(%s::vector, reid_centroid)",
+            ]
+            params = [new_face, new_reid]
             if promoted_type:
-                cur.execute("""
-                    UPDATE pipeline.identities SET
-                        face_centroid   = COALESCE(%s::vector, face_centroid),
-                        reid_centroid   = COALESCE(%s::vector, reid_centroid),
-                        enrollment_type = %s,
-                        sighting_count  = sighting_count + 1,
-                        updated_at      = now()
-                    WHERE id = %s
-                """, (new_face, new_reid, promoted_type, rid))
-            else:
-                cur.execute("""
-                    UPDATE pipeline.identities SET
-                        face_centroid  = COALESCE(%s::vector, face_centroid),
-                        reid_centroid  = COALESCE(%s::vector, reid_centroid),
-                        sighting_count = sighting_count + 1,
-                        updated_at     = now()
-                    WHERE id = %s
-                """, (new_face, new_reid, rid))
+                set_clauses.append("enrollment_type = %s")
+                params.append(promoted_type)
+            set_clauses += [
+                "sighting_count = sighting_count + 1",
+                "updated_at = now()",
+            ]
+            params.append(rid)
+            cur.execute("""
+                UPDATE pipeline.identities SET {sets}
+                WHERE id = %s
+            """.format(sets=", ".join(set_clauses)), params)
         else:
             if promoted_type:
                 cur.execute("""
@@ -516,66 +516,66 @@ def ensure_identity(cur, project_id: str, bib: Optional[str],
 
         # If face/reid vecs are provided, blend them in
         if face_vec is not None or reid_vec is not None:
-            # ── Similarity gate (same as enroll_identity) ─────────
+            incoming_rank = _ENROLL_RANK.get(enrollment_type, 8)
+            existing_rank = _ENROLL_RANK.get(existing_enrollment, 8)
+
             has_existing = (existing_face_pg is not None
                            or existing_reid_pg is not None)
             has_incoming = (face_vec is not None or reid_vec is not None)
             if has_existing and has_incoming and sighting_count >= 2:
-                sim = _biometric_sim(face_vec, existing_face_pg,
-                                     reid_vec, existing_reid_pg)
+                face_sim = _cosine_sim(face_vec, existing_face_pg)
+                reid_sim = _cosine_sim(reid_vec, existing_reid_pg)
+                sim = face_sim if face_sim > 0 else reid_sim
+
+                # ── Rank override ─────────────────────────────────
+                if incoming_rank < existing_rank:
+                    logger.info(
+                        "ensure_identity_rank_override bib=%s sim=%.3f "
+                        "incoming=%s(rank=%d) existing=%s(rank=%d) "
+                        "sightings=%d → replacing centroid + ghost release",
+                        bib, sim, enrollment_type, incoming_rank,
+                        existing_enrollment, existing_rank, sighting_count,
+                    )
+                    released_ghost_id = release_subjects_to_ghost(
+                        cur, rid, project_id,
+                        incoming_rank,
+                        existing_face_pg, existing_reid_pg,
+                    )
+                    cur.execute("""
+                        UPDATE pipeline.identities SET
+                            face_centroid   = %s::vector,
+                            reid_centroid   = COALESCE(%s::vector, reid_centroid),
+                            enrollment_type = %s,
+                            sighting_count  = 2,
+                            updated_at      = now()
+                        WHERE id = %s
+                    """, (_vec_to_pg(face_vec),
+                          _vec_to_pg(reid_vec),
+                          enrollment_type, rid))
+                    return rid
+
+                # ── Similarity gate ───────────────────────────────
                 if sim < _cfg.ENROLLMENT_MIN_SIM:
-                    incoming_rank = _ENROLL_RANK.get(enrollment_type, 8)
-                    existing_rank = _ENROLL_RANK.get(existing_enrollment, 8)
+                    logger.warning(
+                        "ensure_identity_blend_rejected_to_ghost "
+                        "bib=%s sim=%.3f threshold=%.2f "
+                        "incoming=%s existing=%s sightings=%d "
+                        "→ diverting to ghost",
+                        bib, sim, _cfg.ENROLLMENT_MIN_SIM,
+                        enrollment_type, existing_enrollment,
+                        sighting_count,
+                    )
+                    ghost_id = str(uuid.uuid4())
+                    cur.execute("""
+                        INSERT INTO pipeline.identities
+                            (id, project_id, bib, face_centroid,
+                             reid_centroid, enrollment_type)
+                        VALUES (%s, %s, NULL, %s::vector,
+                                %s::vector, 'ghost')
+                    """, (ghost_id, project_id,
+                          _vec_to_pg(face_vec), _vec_to_pg(reid_vec)))
+                    return ghost_id
 
-                    if incoming_rank < existing_rank:
-                        logger.warning(
-                            "ensure_identity_rank_override bib=%s sim=%.3f "
-                            "incoming=%s(rank=%d) existing=%s(rank=%d) "
-                            "sightings=%d → replacing centroid + ghost release",
-                            bib, sim, enrollment_type, incoming_rank,
-                            existing_enrollment, existing_rank, sighting_count,
-                        )
-                        released_ghost_id = release_subjects_to_ghost(
-                            cur, rid, project_id,
-                            incoming_rank,
-                            existing_face_pg, existing_reid_pg,
-                        )
-                        cur.execute("""
-                            UPDATE pipeline.identities SET
-                                face_centroid  = COALESCE(%s::vector, face_centroid),
-                                reid_centroid  = COALESCE(%s::vector, reid_centroid),
-                                enrollment_type = %s,
-                                sighting_count = 2,
-                                updated_at     = now()
-                            WHERE id = %s
-                        """, (_vec_to_pg(face_vec), _vec_to_pg(reid_vec),
-                              enrollment_type, rid))
-                        return rid
-                    else:
-                        # Lower or equal confidence — divert to ghost
-                        logger.warning(
-                            "ensure_identity_blend_rejected_to_ghost "
-                            "bib=%s sim=%.3f threshold=%.2f "
-                            "incoming=%s existing=%s sightings=%d "
-                            "→ diverting to ghost",
-                            bib, sim, _cfg.ENROLLMENT_MIN_SIM,
-                            enrollment_type, existing_enrollment,
-                            sighting_count,
-                        )
-                        ghost_id = str(uuid.uuid4())
-                        cur.execute("""
-                            INSERT INTO pipeline.identities
-                                (id, project_id, bib, face_centroid,
-                                 reid_centroid, enrollment_type)
-                            VALUES (%s, %s, NULL, %s::vector,
-                                    %s::vector, 'ghost')
-                        """, (ghost_id, project_id,
-                              _vec_to_pg(face_vec), _vec_to_pg(reid_vec)))
-                        return ghost_id
-
-            # ── Promote enrollment_type if incoming has better rank ──
-            incoming_rank = _ENROLL_RANK.get(enrollment_type, 8)
-            existing_rank = _ENROLL_RANK.get(existing_enrollment, 8)
             promoted_type = enrollment_type if incoming_rank < existing_rank else None
 
             shard_created = _update_or_create_shard(
@@ -586,25 +586,23 @@ def ensure_identity(cur, project_id: str, bib: Optional[str],
             if not shard_created:
                 new_face = _blend(existing_face_pg, face_vec)
                 new_reid = _blend(existing_reid_pg, reid_vec)
+                set_clauses = [
+                    "face_centroid = COALESCE(%s::vector, face_centroid)",
+                    "reid_centroid = COALESCE(%s::vector, reid_centroid)",
+                ]
+                params = [new_face, new_reid]
                 if promoted_type:
-                    cur.execute("""
-                        UPDATE pipeline.identities SET
-                            face_centroid   = COALESCE(%s::vector, face_centroid),
-                            reid_centroid   = COALESCE(%s::vector, reid_centroid),
-                            enrollment_type = %s,
-                            sighting_count  = sighting_count + 1,
-                            updated_at      = now()
-                        WHERE id = %s
-                    """, (new_face, new_reid, promoted_type, rid))
-                else:
-                    cur.execute("""
-                        UPDATE pipeline.identities SET
-                            face_centroid  = COALESCE(%s::vector, face_centroid),
-                            reid_centroid  = COALESCE(%s::vector, reid_centroid),
-                            sighting_count = sighting_count + 1,
-                            updated_at     = now()
-                        WHERE id = %s
-                    """, (new_face, new_reid, rid))
+                    set_clauses.append("enrollment_type = %s")
+                    params.append(promoted_type)
+                set_clauses += [
+                    "sighting_count = sighting_count + 1",
+                    "updated_at = now()",
+                ]
+                params.append(rid)
+                cur.execute("""
+                    UPDATE pipeline.identities SET {sets}
+                    WHERE id = %s
+                """.format(sets=", ".join(set_clauses)), params)
             else:
                 if promoted_type:
                     cur.execute("""
@@ -785,28 +783,33 @@ def adopt_ghosts_for_bib(cur, project_id: str, bib: str) -> tuple:
     if not confirmed:
         return (0, None, set())
     confirmed_id = str(confirmed[0])
-    face_pg = confirmed[1]
-    reid_pg = confirmed[2]
-    if face_pg is None and reid_pg is None:
+    c_face = confirmed[1]
+    c_reid = confirmed[2]
+    if c_face is None and c_reid is None:
         return (0, confirmed_id, set())
 
     cur.execute("""
-        SELECT id,
-               CASE WHEN face_centroid IS NOT NULL AND %s IS NOT NULL
-                    THEN 1 - (face_centroid <=> %s::vector) ELSE NULL END,
-               CASE WHEN reid_centroid IS NOT NULL AND %s IS NOT NULL
-                    THEN 1 - (reid_centroid <=> %s::vector) ELSE NULL END
+        SELECT id, face_centroid, reid_centroid
         FROM pipeline.identities
         WHERE project_id = %s AND bib IS NULL AND id != %s
-    """, (face_pg, face_pg, reid_pg, reid_pg, project_id, confirmed_id))
+    """, (project_id, confirmed_id))
 
     matched_ghost_ids: list[str] = []
-    for ghost_id, face_sim, reid_sim in cur.fetchall():
+    for ghost_id, g_face, g_reid in cur.fetchall():
+        face_sim = _cosine_sim(c_face, g_face) if (c_face is not None and g_face is not None) else None
+        reid_sim = _cosine_sim(c_reid, g_reid) if (c_reid is not None and g_reid is not None) else None
+
         matched = False
+        # Path 1: face-strict — face alone is decisive
         if face_sim is not None and face_sim >= _cfg.CASCADE_FACE_STRICT:
             matched = True
+        # Path 2: strong ReID confirmed by moderate face
         elif (face_sim is not None and reid_sim is not None
               and reid_sim >= _cfg.CASCADE_REID_STRONG and face_sim >= _cfg.CASCADE_FACE_SOFT):
+            matched = True
+        # Path 3: ReID-solo gate — high ReID with soft face confirmation
+        elif (reid_sim is not None and reid_sim >= _cfg.CASCADE_REID_SOLO
+              and face_sim is not None and face_sim >= _cfg.CASCADE_REID_SOLO_FACE):
             matched = True
         if matched:
             matched_ghost_ids.append(str(ghost_id))

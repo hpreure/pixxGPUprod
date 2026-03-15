@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS pipeline.identities (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id      TEXT NOT NULL,
     bib             TEXT,                          -- NULL = unmatched ghost
-    face_centroid   vector(512),                   -- InsightFace ArcFace
+    face_centroid   vector(512),                   -- InsightFace ArcFace (frontal)
+    face_centroid_left  vector(512),               -- left-profile centroid
+    face_centroid_right vector(512),               -- right-profile centroid
     reid_centroid   vector(768),                   -- DINOv2 ViT-B/14
     sighting_count  INTEGER NOT NULL DEFAULT 1,
     enrollment_type TEXT,                          -- golden_sample / blind_trust / etc.
