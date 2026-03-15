@@ -775,11 +775,14 @@ class InferenceEngine:
                     (x1, y1, x2, y2, (orig_x1, orig_y1, orig_x2, orig_y2))
                 )
 
+        _BIB_MIN_MASK_OVERLAP = 0.25   # reject bib if <25% on person mask
+
         for pi, candidates in per_crop_bibs.items():
-            # If multiple bib detections in one crop, use the seg mask to
-            # pick the one that overlaps most with this person's silhouette.
-            # A neighbouring runner's bib will fall outside the mask.
-            if len(candidates) > 1 and crop_masks and crop_masks[pi] is not None:
+            # Score every bib detection against the person's seg mask.
+            # - Multi-bib: keep only the best-overlapping bib.
+            # - Single-bib: reject it if overlap is below threshold
+            #   (the bib belongs to a background runner, not this person).
+            if crop_masks and crop_masks[pi] is not None:
                 mask = crop_masks[pi]
                 scored = []
                 for (bx1, by1, bx2, by2, orig_xyxy) in candidates:
@@ -799,7 +802,17 @@ class InferenceEngine:
                     scored.append((overlap, bx1, by1, bx2, by2, orig_xyxy))
                 # Keep only the best-overlapping bib
                 scored.sort(key=lambda s: s[0], reverse=True)
-                candidates = [(s[1], s[2], s[3], s[4], s[5]) for s in scored[:1]]
+                # Reject all bibs below the minimum overlap threshold
+                candidates = [
+                    (s[1], s[2], s[3], s[4], s[5]) for s in scored
+                    if s[0] >= _BIB_MIN_MASK_OVERLAP
+                ][:1]
+                if not candidates:
+                    logger.info("bib_rejected_off_mask",
+                        person_idx=pi,
+                        best_overlap=round(scored[0][0], 3) if scored else 0.0,
+                    )
+                    continue
 
             for (x1, y1, x2, y2, orig_xyxy) in candidates:
                 # Pad bib box to capture clipped leading/trailing digits

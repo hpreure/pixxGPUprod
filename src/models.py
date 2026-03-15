@@ -241,6 +241,17 @@ class InsightFaceWrapper:
 
                     if len(faces) == 1:
                         best_face = faces[0]
+                        # Validate single face against seg mask — reject
+                        # background faces that leak into the person crop.
+                        if mask_i is not None:
+                            overlap = self._face_mask_overlap(best_face, mask_i)
+                            if overlap < _MIN_OVERLAP:
+                                logger.info("single_face_off_mask", extra={
+                                    "crop_idx": i,
+                                    "overlap": round(overlap, 3),
+                                })
+                                results[i] = self._empty_result()
+                                continue
                     elif mask_i is not None:
                         # ── Seg-mask overlap selection (Option C) ─────────
                         # Score each face by the fraction of its bbox that

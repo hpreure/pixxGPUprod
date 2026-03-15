@@ -328,12 +328,13 @@ class DetectionConfig:
 
     # ── OCR Anchor Hostile-Biometric Cross-Check ──────────────────
     # When biometric gravitation (step 4) fails but OCR is compatible
-    # (step 5), block the OCR merge if both face AND reid are below
-    # these floors — indicating clearly different people sharing a
-    # partial bib reading (e.g. "382" matching both 3802 and 3821).
-    # Deliberately permissive: only vetoes obvious mismatches.
-    OCR_ANCHOR_HOSTILE_FACE: float = 0.15
-    OCR_ANCHOR_HOSTILE_REID: float = 0.40
+    # (step 5), block the OCR merge if EITHER face OR reid is below
+    # these floors — indicating different people sharing a partial
+    # bib reading (e.g. "368" matching 3681 via subsequence).
+    # The OR logic ensures one weak biometric is enough to veto;
+    # legitimate same-person merges pass Step 4's dual-gate instead.
+    OCR_ANCHOR_HOSTILE_FACE: float = 0.30
+    OCR_ANCHOR_HOSTILE_REID: float = 0.65
 
     # Below FACE_CONFLICT_SIM the faces are clearly different people.
     # Applies FACE_CONFLICT_PENALTY to discourage linking.

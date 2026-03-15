@@ -452,8 +452,8 @@ def cluster_burst_detections(
                     # Only fires when biometric gravitation did not
                     # match (vectors missing or below dual-gate).
                     # Cross-check: if both sides HAVE vectors but
-                    # biometrics are actively hostile (clearly
-                    # different people), block the OCR merge.
+                    # EITHER biometric is hostile (different people
+                    # sharing a partial bib), block the OCR merge.
                     if ocr_match:
                         bio_hostile = False
                         if (crop.face_vector is not None
@@ -463,7 +463,7 @@ def cluster_burst_detections(
                             if (crop.reid_vector is not None
                                     and cluster.blended_reid_vec is not None):
                                 ck_reid = _reid_cosine(crop.reid_vector, cluster.blended_reid_vec)
-                            if ck_face < _cfg.OCR_ANCHOR_HOSTILE_FACE and ck_reid < _cfg.OCR_ANCHOR_HOSTILE_REID:
+                            if ck_face < _cfg.OCR_ANCHOR_HOSTILE_FACE or ck_reid < _cfg.OCR_ANCHOR_HOSTILE_REID:
                                 bio_hostile = True
                         if not bio_hostile:
                             matched_cluster = cluster
@@ -578,12 +578,29 @@ def run_cascade(
 
             # ── Rule 12: Lingering Finisher (outside HINT_WINDOW_S) ──
             if c.consensus_bib in timed_participants:
-                # Time-bound gate: reject if photo is too far from finish
                 if burst_sod is not None:
                     finish_sod = timed_participants[c.consensus_bib]
                     delta = abs(burst_sod - finish_sod)
                     if delta > _cfg.DELAYED_MAX_DELTA_S:
-                        c.assign(c.consensus_bib, "ocr_unvalidated")
+                        # OCR bib is temporally incompatible with this
+                        # photo.  Before ghosting, check whether a
+                        # timing-compatible alternative exists via
+                        # bib_is_compatible (e.g. OCR "3907" → bib 3947
+                        # whose finish_time is only seconds away).
+                        timing_rescues = [
+                            bib for bib, fsod in timed_participants.items()
+                            if bib != c.consensus_bib
+                            and bib not in claimed_hints
+                            and db.bib_is_compatible(c.consensus_bib, bib)
+                            and abs(burst_sod - fsod) <= _cfg.DELAYED_MAX_DELTA_S
+                        ]
+                        if len(timing_rescues) == 1:
+                            # Unambiguous reroute
+                            c.assign(timing_rescues[0], "golden_delayed")
+                            unassigned.remove(c)
+                            continue
+                        # 0 or 2+ matches → ghost (don't guess)
+                        c.assign(None, "ghost")
                         unassigned.remove(c)
                         continue
                 c.assign(c.consensus_bib, "golden_delayed")

@@ -380,7 +380,19 @@ def enroll_identity(cur, project_id: str, bib: str,
         if has_existing and has_incoming and sighting_count >= 2:
             face_sim = _cosine_sim(face_vec, existing_face_pg)
             reid_sim = _cosine_sim(reid_vec, existing_reid_pg)
-            sim = face_sim if face_sim > 0 else reid_sim
+            # Face is authoritative when both sides have vectors;
+            # ReID baseline between strangers (~0.5) is too high to
+            # gate on.  Only fall back to ReID when face is absent.
+            has_face_both = (face_vec is not None
+                            and existing_face_pg is not None)
+            has_reid_both = (reid_vec is not None
+                            and existing_reid_pg is not None)
+            if has_face_both:
+                sim = face_sim
+            elif has_reid_both:
+                sim = reid_sim
+            else:
+                sim = 0.0
 
             # ── Rank override ─────────────────────────────────────
             # A higher-priority enrollment always replaces a lower-
@@ -525,7 +537,19 @@ def ensure_identity(cur, project_id: str, bib: Optional[str],
             if has_existing and has_incoming and sighting_count >= 2:
                 face_sim = _cosine_sim(face_vec, existing_face_pg)
                 reid_sim = _cosine_sim(reid_vec, existing_reid_pg)
-                sim = face_sim if face_sim > 0 else reid_sim
+                # Face is authoritative when both sides have vectors;
+                # ReID baseline between strangers (~0.5) is too high
+                # to gate on.  Only fall back when face is absent.
+                has_face_both = (face_vec is not None
+                                and existing_face_pg is not None)
+                has_reid_both = (reid_vec is not None
+                                and existing_reid_pg is not None)
+                if has_face_both:
+                    sim = face_sim
+                elif has_reid_both:
+                    sim = reid_sim
+                else:
+                    sim = 0.0
 
                 # ── Rank override ─────────────────────────────────
                 if incoming_rank < existing_rank:
@@ -772,62 +796,74 @@ def record_subjects_batch(cur, subjects_data: List[dict]):
 def adopt_ghosts_for_bib(cur, project_id: str, bib: str) -> tuple:
     """
     Re-assign ghost subjects whose vectors match the confirmed bib identity.
+
+    Uses pgvector SQL-side cosine filtering (``<=>`` operator) so that
+    ghost vectors never leave PostgreSQL unless they actually match.
+    NULL-centroid ghosts are excluded at the SQL level.
+
     Returns (adopted_count, confirmed_id, deleted_ghost_ids).
     """
+    # ── Step 1: SQL-side biometric match ──────────────────────────
+    # A CTE fetches the confirmed identity, then ghosts are filtered
+    # in-database using pgvector's cosine-distance operator.  Only
+    # matching ghost IDs come back — no Python vector loop.
     cur.execute("""
-        SELECT id, face_centroid, reid_centroid
-        FROM pipeline.identities
-        WHERE project_id = %s AND bib = %s
-    """, (project_id, bib))
-    confirmed = cur.fetchone()
-    if not confirmed:
+        WITH confirmed AS (
+            SELECT id, face_centroid, reid_centroid
+            FROM pipeline.identities
+            WHERE project_id = %s AND bib = %s
+            LIMIT 1
+        )
+        SELECT c.id  AS confirmed_id,
+               g.id  AS ghost_id
+        FROM   confirmed c,
+               pipeline.identities g
+        WHERE  g.project_id = %s
+          AND  g.bib IS NULL
+          AND  g.id != c.id
+          AND  g.face_centroid IS NOT NULL
+          AND  c.face_centroid IS NOT NULL
+          AND (
+                -- Path 1: face-strict
+                (1 - (g.face_centroid <=> c.face_centroid)) >= %s
+                -- Path 2: strong ReID + moderate face
+             OR (    g.reid_centroid IS NOT NULL
+                 AND c.reid_centroid IS NOT NULL
+                 AND (1 - (g.reid_centroid <=> c.reid_centroid)) >= %s
+                 AND (1 - (g.face_centroid <=> c.face_centroid)) >= %s)
+                -- Path 3: ReID-solo gate
+             OR (    g.reid_centroid IS NOT NULL
+                 AND c.reid_centroid IS NOT NULL
+                 AND (1 - (g.reid_centroid <=> c.reid_centroid)) >= %s
+                 AND (1 - (g.face_centroid <=> c.face_centroid)) >= %s)
+              )
+    """, (
+        project_id, bib,
+        project_id,
+        _cfg.CASCADE_FACE_STRICT,
+        _cfg.CASCADE_REID_STRONG, _cfg.CASCADE_FACE_SOFT,
+        _cfg.CASCADE_REID_SOLO,   _cfg.CASCADE_REID_SOLO_FACE,
+    ))
+    rows = cur.fetchall()
+    if not rows:
         return (0, None, set())
-    confirmed_id = str(confirmed[0])
-    c_face = confirmed[1]
-    c_reid = confirmed[2]
-    if c_face is None and c_reid is None:
-        return (0, confirmed_id, set())
 
+    confirmed_id = str(rows[0][0])
+    matched_ghost_ids = [str(r[1]) for r in rows]
+
+    # ── Step 2: Batch OCR-aware veto (single round-trip) ──────────
     cur.execute("""
-        SELECT id, face_centroid, reid_centroid
-        FROM pipeline.identities
-        WHERE project_id = %s AND bib IS NULL AND id != %s
-    """, (project_id, confirmed_id))
+        SELECT identity_id, ARRAY_AGG(DISTINCT ocr_bib)
+        FROM   pipeline.subjects
+        WHERE  identity_id = ANY(%s::uuid[])
+          AND  ocr_bib IS NOT NULL
+        GROUP  BY identity_id
+    """, (matched_ghost_ids,))
+    ghost_ocr_map = {str(r[0]): r[1] for r in cur.fetchall()}
 
-    matched_ghost_ids: list[str] = []
-    for ghost_id, g_face, g_reid in cur.fetchall():
-        face_sim = _cosine_sim(c_face, g_face) if (c_face is not None and g_face is not None) else None
-        reid_sim = _cosine_sim(c_reid, g_reid) if (c_reid is not None and g_reid is not None) else None
-
-        matched = False
-        # Path 1: face-strict — face alone is decisive
-        if face_sim is not None and face_sim >= _cfg.CASCADE_FACE_STRICT:
-            matched = True
-        # Path 2: strong ReID confirmed by moderate face
-        elif (face_sim is not None and reid_sim is not None
-              and reid_sim >= _cfg.CASCADE_REID_STRONG and face_sim >= _cfg.CASCADE_FACE_SOFT):
-            matched = True
-        # Path 3: ReID-solo gate — high ReID with soft face confirmation
-        elif (reid_sim is not None and reid_sim >= _cfg.CASCADE_REID_SOLO
-              and face_sim is not None and face_sim >= _cfg.CASCADE_REID_SOLO_FACE):
-            matched = True
-        if matched:
-            matched_ghost_ids.append(str(ghost_id))
-
-    if not matched_ghost_ids:
-        return (0, confirmed_id, set())
-
-    # ── OCR-aware ghost adoption veto ─────────────────────────────
-    # If a ghost's subjects already carry a clear OCR bib that
-    # conflicts with the confirmed bib, adopting them would
-    # contaminate the identity (e.g. ghost ocr=3499 into bib=3011).
     vetted_ghost_ids: list[str] = []
     for gid in matched_ghost_ids:
-        cur.execute("""
-            SELECT DISTINCT ocr_bib FROM pipeline.subjects
-            WHERE identity_id = %s AND ocr_bib IS NOT NULL
-        """, (gid,))
-        ghost_bibs = [row[0] for row in cur.fetchall()]
+        ghost_bibs = ghost_ocr_map.get(gid, [])
         if any(gb != bib and not bib_is_compatible(gb, bib)
                for gb in ghost_bibs):
             continue
@@ -836,6 +872,7 @@ def adopt_ghosts_for_bib(cur, project_id: str, bib: str) -> tuple:
     if not vetted_ghost_ids:
         return (0, confirmed_id, set())
 
+    # ── Step 3: Adopt subjects + purge empty ghosts ───────────────
     cur.execute("""
         UPDATE pipeline.subjects
         SET identity_id = %s, assigned_bib = %s, match_type = 'ghost_adopted'
