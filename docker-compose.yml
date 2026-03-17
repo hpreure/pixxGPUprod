@@ -166,6 +166,42 @@ services:
     networks:
       - pixxengine_net
 
+  # ============================================
+  # DBGate — PostgreSQL Web Browser
+  # ============================================
+  dbgate:
+    image: dbgate/dbgate:latest
+    container_name: pixxengine_dbgate
+    environment:
+      # ── Authentication ─────────────────────────────
+      LOGIN: ${DBGATE_LOGIN}
+      PASSWORD: ${DBGATE_PASSWORD}
+      # ── Pre-configured PostgreSQL connection ───────
+      CONNECTIONS: con1
+      LABEL_con1: pixxEngine PostgreSQL
+      SERVER_con1: postgres
+      PORT_con1: 5432
+      USER_con1: ${POSTGRES_USER}
+      PASSWORD_con1: ${POSTGRES_PASSWORD}
+      DATABASE_con1: ${POSTGRES_DB}
+      ENGINE_con1: postgres@dbgate-plugin-postgres
+    volumes:
+      - dbgate_data:/root/.dbgate
+    ports:
+      # 🔒 Tailscale only — access from your laptop via http://100.122.88.68:8080
+      - "100.122.88.68:8080:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - pixxengine_net
+
 networks:
   pixxengine_net:
     driver: bridge
@@ -175,3 +211,4 @@ volumes:
   rabbitmq_data:
   loki_data:
   grafana_data:
+  dbgate_data:

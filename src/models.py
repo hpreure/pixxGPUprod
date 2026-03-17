@@ -194,6 +194,7 @@ class InsightFaceWrapper:
         self,
         crops: List[np.ndarray],
         seg_masks: Optional[List[Optional[np.ndarray]]] = None,
+        photo_hints: Optional[List[str]] = None,
     ) -> List[dict]:
         """
         Batched face extraction - processes all crops efficiently.
@@ -246,10 +247,24 @@ class InsightFaceWrapper:
                         if mask_i is not None:
                             overlap = self._face_mask_overlap(best_face, mask_i)
                             if overlap < _MIN_OVERLAP:
-                                logger.info("single_face_off_mask", extra={
+                                _ch, _cw = crop.shape[:2]
+                                _fbx = [int(round(v)) for v in best_face.bbox[:4]]
+                                _mask_cov = float(mask_i.sum()) / (_ch * _cw) if _ch * _cw > 0 else 0
+                                _top_q = mask_i[:max(1, _ch // 4), :]
+                                _top_q_cov = float(_top_q.sum()) / _top_q.size if _top_q.size > 0 else 0
+                                import json as _json
+                                _phint = photo_hints[i] if photo_hints and i < len(photo_hints) else "?"
+                                logger.info("single_face_off_mask | %s", _json.dumps({
+                                    "photo": _phint,
                                     "crop_idx": i,
                                     "overlap": round(overlap, 3),
-                                })
+                                    "face_score": round(float(best_face.det_score), 3),
+                                    "face_bbox": _fbx,
+                                    "crop_hw": [_ch, _cw],
+                                    "mask_coverage": round(_mask_cov, 3),
+                                    "top_quarter_mask_cov": round(_top_q_cov, 3),
+                                    "face_y_ratio": round(_fbx[1] / _ch, 3) if _ch > 0 else 0,
+                                }))
                                 results[i] = self._empty_result()
                                 continue
                     elif mask_i is not None:
@@ -263,11 +278,23 @@ class InsightFaceWrapper:
                         if best_overlap < _MIN_OVERLAP:
                             # No face convincingly belongs to this person —
                             # treat as faceless to avoid contamination.
-                            logger.info("multi_face_all_off_mask", extra={
+                            _ch, _cw = crop.shape[:2]
+                            _mask_cov = float(mask_i.sum()) / (_ch * _cw) if _ch * _cw > 0 else 0
+                            _top_q = mask_i[:max(1, _ch // 4), :]
+                            _top_q_cov = float(_top_q.sum()) / _top_q.size if _top_q.size > 0 else 0
+                            _all_overlaps = [round(s[1], 3) for s in scored]
+                            import json as _json
+                            _phint = photo_hints[i] if photo_hints and i < len(photo_hints) else "?"
+                            logger.info("multi_face_all_off_mask | %s", _json.dumps({
+                                "photo": _phint,
                                 "crop_idx": i,
                                 "face_count": len(faces),
                                 "best_overlap": round(best_overlap, 3),
-                            })
+                                "all_overlaps": _all_overlaps,
+                                "crop_hw": [_ch, _cw],
+                                "mask_coverage": round(_mask_cov, 3),
+                                "top_quarter_mask_cov": round(_top_q_cov, 3),
+                            }))
                             results[i] = self._empty_result()
                             continue
 
@@ -329,6 +356,7 @@ class InsightFaceWrapper:
         self,
         face_crops: List[np.ndarray],
         seg_masks: Optional[List[Optional[np.ndarray]]] = None,
+        photo_hints: Optional[List[str]] = None,
     ) -> List[dict]:
         """
         Extract face embeddings and landmarks.
@@ -336,12 +364,13 @@ class InsightFaceWrapper:
         Args:
             face_crops: List of face crop images (BGR, numpy arrays)
             seg_masks: Optional per-crop binary masks for face ownership filtering.
+            photo_hints: Optional per-crop photo identifiers for diagnostic logging.
         
         Returns:
             List of dicts with 'embedding', 'landmarks', 'quality' keys
         """
         # Delegate to optimized batch method
-        return self.extract_batch(face_crops, seg_masks=seg_masks)
+        return self.extract_batch(face_crops, seg_masks=seg_masks, photo_hints=photo_hints)
     
     def _empty_result(self) -> dict:
         """Return empty result dict for faces not detected."""

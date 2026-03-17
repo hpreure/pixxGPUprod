@@ -109,6 +109,25 @@ def load_all_bibs(project_id: str) -> set:
         return {row[0] for row in cur.fetchall()}
 
 
+def load_registered_bibs(project_id: str) -> set:
+    """Return ALL registered bib numbers regardless of finish_time.
+
+    This includes participants whose timing data is missing (e.g. timing
+    provider malfunction).  Used by Rule 9 to distinguish "registered
+    participant without timing" from "completely unknown bib".
+    """
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT bib_number FROM public.api_participantinfo
+            WHERE project_id = %s
+              AND bib_number IS NOT NULL
+        """, (project_id,))
+        bibs = {row[0] for row in cur.fetchall()}
+        logger.info("Loaded %d registered bibs for project %s",
+                    len(bibs), project_id)
+        return bibs
+
+
 def _parse_finish_time(time_str) -> Optional[float]:
     """Parse finish time string to seconds since midnight.
 
@@ -258,6 +277,7 @@ _ENROLL_RANK = {
     "golden_delayed":          2,
     "error_map_timing":        3,
     "ocr_unvalidated":         4,
+    "ocr_registered":          4,
     "blind_trust":             5,
     "hint_remainder":          6,
     "ghost_adopted":           7,

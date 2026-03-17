@@ -323,8 +323,8 @@ class DetectionConfig:
     # ── In-Burst ReID Gate ────────────────────────────────────────
     # Minimum ReID cosine similarity for biometric gravitation in
     # in-burst clustering.  Step 4 now requires BOTH face >= 0.40
-    # AND reid >= 0.80 to merge — neither alone is sufficient.
-    CLUSTER_REID_MIN: float = 0.80
+    # AND reid >= 0.70 to merge — neither alone is sufficient.
+    CLUSTER_REID_MIN: float = 0.70
 
     # ── OCR Anchor Hostile-Biometric Cross-Check ──────────────────
     # When biometric gravitation (step 4) fails but OCR is compatible

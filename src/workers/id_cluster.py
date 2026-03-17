@@ -304,7 +304,7 @@ class IdentityCluster:
 # ═══════════════════════════════════════════════════════════════════
 
 class ProjectReferenceCache:
-    """Caches valid_bibs and timed_participants per project.
+    """Caches valid_bibs, registered_bibs, and timed_participants per project.
 
     These are the ONLY DB reads id_cluster performs — once at startup
     per project, cached across bursts.
@@ -312,12 +312,18 @@ class ProjectReferenceCache:
 
     def __init__(self):
         self._bibs: Dict[str, set] = {}
+        self._registered: Dict[str, set] = {}
         self._timed: Dict[str, Dict[str, float]] = {}
 
     def get_valid_bibs(self, project_id: str) -> set:
         if project_id not in self._bibs:
             self._bibs[project_id] = db.load_all_bibs(project_id)
         return self._bibs[project_id]
+
+    def get_registered_bibs(self, project_id: str) -> set:
+        if project_id not in self._registered:
+            self._registered[project_id] = db.load_registered_bibs(project_id)
+        return self._registered[project_id]
 
     def get_timed_participants(self, project_id: str) -> Dict[str, float]:
         if project_id not in self._timed:
@@ -370,6 +376,12 @@ def cluster_burst_detections(
     """
     _hints = burst_hints or set()
     clusters: List[IdentityCluster] = []
+
+    # Sort images by camera_serial (then photo_id) so same-camera
+    # crops cluster first, producing tighter intra-camera centroids
+    # before cross-camera crops attempt to join.
+    images = sorted(images, key=lambda img: (
+        img.get("camera_serial") or "", img.get("photo_id", 0)))
 
     for frame_idx, img in enumerate(images):
         if not img.get("success") or not img.get("persons"):
@@ -517,12 +529,14 @@ def run_cascade(
     valid_bibs: set,
     timed_participants: Dict[str, float],
     burst_sod: Optional[float] = None,
+    registered_bibs: Optional[set] = None,
 ) -> None:
     """Apply the 13-rule deterministic cascade to resolve cluster identities.
 
     Mutates each cluster's ``assigned_bib`` and ``match_type`` in place.
     Clusters with OCR are evaluated first (highest confidence first).
     """
+    _registered = registered_bibs or set()
     unassigned = sorted(
         clusters,
         key=lambda c: (c.consensus_bib is not None, c.consensus_conf),
@@ -613,7 +627,13 @@ def run_cascade(
                 unassigned.remove(c)
                 continue
 
-            # ── Rule 9: Hard Conflict ─────────────────────────────
+            # ── Rule 9a: Registered Orphan (registered bib, no timing) ──
+            if c.consensus_bib in _registered:
+                c.assign(c.consensus_bib, "ocr_registered")
+                unassigned.remove(c)
+                continue
+
+            # ── Rule 9b: Hard Conflict ────────────────────────────
             c.assign(None, "ghost")
             unassigned.remove(c)
 
@@ -848,7 +868,8 @@ def process_payload(payload: dict) -> bool:
             break  # all images in a burst share the same timestamp
 
     # ── Phase 2: Deterministic Cascade ────────────────────────────
-    run_cascade(clusters, burst_hints, valid_bibs, timed_participants, burst_sod)
+    registered_bibs = _ref_cache.get_registered_bibs(project_id)
+    run_cascade(clusters, burst_hints, valid_bibs, timed_participants, burst_sod, registered_bibs)
 
     matched = [c for c in clusters if c.assigned_bib]
     ghosts = sum(1 for c in clusters if c.match_type and "ghost" in c.match_type)

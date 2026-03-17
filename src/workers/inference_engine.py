@@ -537,7 +537,13 @@ class InferenceEngine:
                         face_seg_masks.append(crop_mask)
                     else:
                         face_seg_masks.append(None)
-                face_results = self.face_model.extract(face_crops, seg_masks=face_seg_masks)
+                # Build photo hints for diagnostic logging inside InsightFaceWrapper
+                _photo_hints = []
+                for s in capped_survivors:
+                    _ii = s[0]
+                    _pp = photo_paths[images[_ii][0]] if _ii < len(images) else "?"
+                    _photo_hints.append(_pp.rsplit("/", 1)[-1] if "/" in str(_pp) else str(_pp))
+                face_results = self.face_model.extract(face_crops, seg_masks=face_seg_masks, photo_hints=_photo_hints)
                 for i, fr in enumerate(face_results):
                     if fr and fr.get('embedding') is not None:
                         all_face_pre[i] = fr
@@ -557,9 +563,19 @@ class InferenceEngine:
         gpu_crops_raw:  List[Tuple[np.ndarray, Optional[np.ndarray]]] = []
         face_kept: List[Optional[dict]] = []
 
+        _faceless_dropped = []  # collect details for logging
         for si, surv in enumerate(capped_survivors):
             # Drop faceless only when the face model actually ran
             if _has_face_model and all_face_pre[si] is None:
+                _img_i_d = surv[0]
+                _x1d, _y1d, _x2d, _y2d, _confd = surv[1], surv[2], surv[3], surv[4], surv[5]
+                _photo_path_d = photo_paths[images[_img_i_d][0]] if _img_i_d < len(images) else "?"
+                _faceless_dropped.append({
+                    "photo": _photo_path_d.rsplit("/", 1)[-1] if "/" in str(_photo_path_d) else str(_photo_path_d),
+                    "bbox": [_x1d, _y1d, _x2d, _y2d],
+                    "conf": round(_confd, 3),
+                    "crop_hw": [_y2d - _y1d, _x2d - _x1d],
+                })
                 continue
 
             img_i, x1, y1, x2, y2, conf, raw_crop, seg_mask, blur_score, is_blurry = surv
@@ -592,7 +608,13 @@ class InferenceEngine:
             anchor_survivors=len(anchor_survivors),
             capped_survivors=len(capped_survivors),
             after_face_rejection=total_persons,
+            faceless_dropped=len(_faceless_dropped),
         )
+        if _faceless_dropped:
+            logger.info("faceless_rejection_detail",
+                dropped=_faceless_dropped[:20],  # cap to avoid log bloat
+                total_dropped=len(_faceless_dropped),
+            )
 
         # ── 3. Batched ReID extraction — masked crops (survivors only) ──
         all_reid_gpu = [None] * total_gpu

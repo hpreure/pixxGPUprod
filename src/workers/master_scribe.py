@@ -72,6 +72,7 @@ _MATCH_TYPE_PRIORITY = {
     "golden_delayed":          2,
     "error_map_timing":        3,
     "ocr_unvalidated":         4,
+    "ocr_registered":          4,
     "blind_trust":             5,
     "hint_remainder":          6,
     "ghost_adopted":           7,
@@ -473,11 +474,20 @@ class MasterScribe:
         photo_ids = [str(pid) for pid in task.get("photo_ids", [])]
         per_image: dict = {pid: {"runners": []} for pid in photo_ids}
         burst_bibs: dict = {}  # bib → max confidence
+        lf_photos: set = set()  # photos carrying ghost/unknown detections
 
         for intent in task.get("intents", []):
-            bib = intent.get("assigned_bib") or intent.get("consensus_bib")
-            if not bib:
+            assigned_bib = intent.get("assigned_bib")
+
+            # Ghost / unknown identity → mark photos for LF tag
+            if assigned_bib is None:
+                for det in intent.get("detections", []):
+                    orig_pid = uuid_to_photo_id.get(det.get("photo_id"))
+                    if orig_pid:
+                        lf_photos.add(orig_pid)
                 continue
+
+            # Known identity → emit runner entries
             intent_conf = intent.get("consensus_conf", 0.0)
 
             for det in intent.get("detections", []):
@@ -495,7 +505,7 @@ class MasterScribe:
 
                 det_conf = det.get("ocr_confidence") or intent_conf
                 runner_entry = {
-                    "bib_number": str(bib),
+                    "bib_number": str(assigned_bib),
                     "confidence": round(float(det_conf), 4),
                     "bbox": [round(px1), round(py1),
                              round(px2 - px1), round(py2 - py1)],
@@ -507,11 +517,18 @@ class MasterScribe:
                     per_image[orig_pid] = {"runners": [runner_entry]}
 
                 # Track burst-level max confidence per bib
-                bib_str = str(bib)
+                bib_str = str(assigned_bib)
                 if bib_str not in burst_bibs or float(det_conf) > burst_bibs[bib_str]:
                     burst_bibs[bib_str] = float(det_conf)
 
-        # Top-level runners (unique bibs, max confidence)
+        # Inject LF tags on photos that carry ghost/unknown detections
+        for pid in lf_photos:
+            if pid in per_image:
+                per_image[pid]["tags"] = ["LF"]
+            else:
+                per_image[pid] = {"runners": [], "tags": ["LF"]}
+
+        # Top-level runners (unique known bibs, max confidence)
         runners = [
             {"bib_number": b, "confidence": round(c, 4)}
             for b, c in sorted(burst_bibs.items())
