@@ -260,21 +260,30 @@ class IdentityCluster:
         return self.best_face_vec is not None or self.blended_reid_vec is not None
 
     def has_multiple_conflicting_high_conf_bibs(
-        self, valid_bibs: set = frozenset(),
+        self,
+        valid_bibs: set = frozenset(),
+        burst_hints: Set[str] = frozenset(),
+        registered_bibs: set = frozenset(),
     ) -> bool:
-        """True if the cluster has 2+ incompatible *valid* best-bibs.
+        """True if the cluster has genuinely conflicting bib readings.
 
         Only the single best bib per crop is considered (highest OCR
         confidence).  Secondary detections (e.g. a neighbouring
         runner's bib leaking into the person crop) are ignored.
 
-        Compatible partial reads (e.g. 1820 / 182 / 820) do NOT
-        trigger a conflict — ``bib_is_compatible`` handles occlusion,
-        substring, and Hamming-1 tolerance.
+        Three-level resolution hierarchy (highest trust first):
 
-        A bib must appear in *valid_bibs* to participate in the
-        conflict check.  Non-participant OCR hallucinations (numbers
-        not in the race) are irrelevant noise.
+        1. **Hint-centric** — if any single ``burst_hint`` is
+           ``bib_is_compatible`` with ALL valid bibs in the cluster,
+           the hint is the true bib and every other reading is OCR
+           noise.  Not a conflict.
+        2. **Registered-but-unfinished** — if no hint resolves it but
+           ``consensus_bib`` is in ``registered_bibs`` (not in
+           ``valid_bibs``), the runner is on-course without timing
+           data yet.  If all valid bibs are compatible with the
+           consensus → not a conflict.
+        3. **Irreconcilable** — no hint and no unfinished-participant
+           anchor → true multi-bib collision.
         """
         best_bibs: Set[str] = set()
         for d in self.detections:
@@ -286,12 +295,22 @@ class IdentityCluster:
             best_bibs = {b for b in best_bibs if b in valid_bibs}
         if len(best_bibs) < 2:
             return False
-        bibs = list(best_bibs)
-        for i in range(len(bibs)):
-            for j in range(i + 1, len(bibs)):
-                if not db.bib_is_compatible(bibs[i], bibs[j]):
-                    return True
-        return False
+
+        # Level 1: Hint-centric — timing hardware is ground truth
+        for hint in burst_hints:
+            if all(db.bib_is_compatible(b, hint) for b in best_bibs):
+                return False
+
+        # Level 2: Registered-but-unfinished (on-course runner)
+        if (self.consensus_bib
+                and self.consensus_bib in registered_bibs
+                and self.consensus_bib not in valid_bibs):
+            if all(db.bib_is_compatible(b, self.consensus_bib)
+                   for b in best_bibs):
+                return False
+
+        # Level 3: Irreconcilable — true multi-bib
+        return True
 
     def assign(self, bib: Optional[str], match_type: str):
         """Set the resolved identity assignment."""
@@ -366,7 +385,9 @@ def cluster_burst_detections(
       5. **OCR Anchor (FALLBACK)** — if biometrics didn't match but
          OCR is compatible, merge UNLESS both face AND reid are below
          hostile thresholds (clearly different people sharing a partial
-         bib reading).
+         bib reading).  **Suppressed** when the crop's OCR is an
+         ambiguous partial (compatible with ≥2 hints) — such crops
+         must merge via biometrics or remain solo.
 
     Rule 13 (Concurrent Frame Veto): crops from the same photo_id
     can never merge into the same cluster.
@@ -410,76 +431,76 @@ def cluster_burst_detections(
             )
 
             # ── 1. Ambiguous Partial Pre-Filter ──────────────────────
-            # ONLY an exact match in _hints overrides the ambiguity
-            # check.  If ambiguous, skip the cluster loop entirely —
-            # the crop falls straight to the fallback solo cluster.
+            # If the OCR partial matches ≥2 hints, flag it so that
+            # Step 5 (OCR Anchor) is suppressed — but Step 4
+            # (Biometric Gravitation) still runs.  This ensures
+            # ambiguous partials can still merge biometrically
+            # instead of being quarantined into solo clusters.
             is_ambiguous_ocr = False
             if crop_has_ocr and crop_bib not in _hints:
                 compat_hints = [h for h in _hints if db.bib_is_compatible(crop_bib, h)]
                 if len(compat_hints) >= 2:
                     is_ambiguous_ocr = True
 
-            if not is_ambiguous_ocr:
-                for cluster in clusters:
-                    # ── Rule 13: Concurrent Frame Veto ──
-                    if str(crop.photo_id) in cluster.photo_ids:
-                        continue
+            for cluster in clusters:
+                # ── Rule 13: Concurrent Frame Veto ──
+                if str(crop.photo_id) in cluster.photo_ids:
+                    continue
 
-                    ocr_match = False
-                    ocr_conflict = False
+                ocr_match = False
+                ocr_conflict = False
 
-                    if crop_has_ocr and cluster.consensus_bib:
-                        if db.bib_is_compatible(crop_bib, cluster.consensus_bib):
-                            ocr_match = True
-                        else:
-                            ocr_conflict = True
+                if crop_has_ocr and cluster.consensus_bib:
+                    if db.bib_is_compatible(crop_bib, cluster.consensus_bib):
+                        ocr_match = True
+                    else:
+                        ocr_conflict = True
 
-                    # ── 2. Hard Veto (Clearly different people) ──
-                    if ocr_conflict:
-                        continue
+                # ── 2. Hard Veto (Clearly different people) ──
+                if ocr_conflict:
+                    continue
 
-                    # ── 3. Hint Disambiguation Veto (The 3223 vs 3224 collision) ──
-                    # STRICTLY _hints only. If they are both physically on the mat,
-                    # they are not a typo of each other.
-                    if (ocr_match
-                            and crop_bib != cluster.consensus_bib
-                            and crop_bib in _hints
-                            and cluster.consensus_bib in _hints):
-                        continue
+                # ── 3. Hint Disambiguation Veto (The 3223 vs 3224 collision) ──
+                # STRICTLY _hints only. If they are both physically on the mat,
+                # they are not a typo of each other.
+                if (ocr_match
+                        and crop_bib != cluster.consensus_bib
+                        and crop_bib in _hints
+                        and cluster.consensus_bib in _hints):
+                    continue
 
-                    # ── 4. Biometric Gravitation (PRIMARY — dual-gate) ──
-                    # Both face AND ReID must agree to merge.
+                # ── 4. Biometric Gravitation (PRIMARY — dual-gate) ──
+                # Both face AND ReID must agree to merge.
+                if (crop.face_vector is not None
+                        and cluster.best_face_vec is not None):
+                    face_sim = _reid_cosine(crop.face_vector, cluster.best_face_vec)
+                    reid_sim = 0.0
+                    if (crop.reid_vector is not None
+                            and cluster.blended_reid_vec is not None):
+                        reid_sim = _reid_cosine(crop.reid_vector, cluster.blended_reid_vec)
+                    if face_sim >= _cfg.FACE_MODERATE_SIM and reid_sim >= _cfg.CLUSTER_REID_MIN:
+                        matched_cluster = cluster
+                        break
+
+                # ── 5. OCR Anchor (FALLBACK — compatible OCR) ──
+                # Only fires when biometric gravitation did not
+                # match (vectors missing or below dual-gate).
+                # Suppressed for ambiguous partials — they must
+                # merge on biometrics or stay solo.
+                if ocr_match and not is_ambiguous_ocr:
+                    bio_hostile = False
                     if (crop.face_vector is not None
                             and cluster.best_face_vec is not None):
-                        face_sim = _reid_cosine(crop.face_vector, cluster.best_face_vec)
-                        reid_sim = 0.0
+                        ck_face = _reid_cosine(crop.face_vector, cluster.best_face_vec)
+                        ck_reid = 0.0
                         if (crop.reid_vector is not None
                                 and cluster.blended_reid_vec is not None):
-                            reid_sim = _reid_cosine(crop.reid_vector, cluster.blended_reid_vec)
-                        if face_sim >= _cfg.FACE_MODERATE_SIM and reid_sim >= _cfg.CLUSTER_REID_MIN:
-                            matched_cluster = cluster
-                            break
-
-                    # ── 5. OCR Anchor (FALLBACK — compatible OCR) ──
-                    # Only fires when biometric gravitation did not
-                    # match (vectors missing or below dual-gate).
-                    # Cross-check: if both sides HAVE vectors but
-                    # EITHER biometric is hostile (different people
-                    # sharing a partial bib), block the OCR merge.
-                    if ocr_match:
-                        bio_hostile = False
-                        if (crop.face_vector is not None
-                                and cluster.best_face_vec is not None):
-                            ck_face = _reid_cosine(crop.face_vector, cluster.best_face_vec)
-                            ck_reid = 0.0
-                            if (crop.reid_vector is not None
-                                    and cluster.blended_reid_vec is not None):
-                                ck_reid = _reid_cosine(crop.reid_vector, cluster.blended_reid_vec)
-                            if ck_face < _cfg.OCR_ANCHOR_HOSTILE_FACE or ck_reid < _cfg.OCR_ANCHOR_HOSTILE_REID:
-                                bio_hostile = True
-                        if not bio_hostile:
-                            matched_cluster = cluster
-                            break
+                            ck_reid = _reid_cosine(crop.reid_vector, cluster.blended_reid_vec)
+                        if ck_face < _cfg.OCR_ANCHOR_HOSTILE_FACE or ck_reid < _cfg.OCR_ANCHOR_HOSTILE_REID:
+                            bio_hostile = True
+                    if not bio_hostile:
+                        matched_cluster = cluster
+                        break
 
             # Fallback: start a new cluster (handles Ambiguous Partials automatically)
             if matched_cluster is None:
@@ -547,7 +568,8 @@ def run_cascade(
 
     for c in list(unassigned):
         # ── Rule 11: Multi-Bib Collision ──────────────────────────
-        if c.has_multiple_conflicting_high_conf_bibs(valid_bibs):
+        if c.has_multiple_conflicting_high_conf_bibs(
+                valid_bibs, burst_hints, _registered):
             c.assign(None, "ghost_multi_bib")
             unassigned.remove(c)
             continue

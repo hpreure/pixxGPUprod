@@ -268,7 +268,9 @@ class DetectionConfig:
     # of partially-occluded multi-digit bibs.  Reject them here to
     # prevent 126 phantom bib identities that pollute the runner space.
     # Analysis: bib "10" appeared 40 times as FP, bib "1" 11 times, etc.
-    MIN_BIB_DIGITS: int = 2
+    # Raised from 2→3: 2-char partials like "17" or "16" match too many
+    # 4-digit hints via substring, causing wrong bib assignment.
+    MIN_BIB_DIGITS: int = 3
 
     # ==========================================
     # 5. IDENTITY CLUSTERING (Cross-Frame Association)
