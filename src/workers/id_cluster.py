@@ -121,12 +121,15 @@ class CropDetection:
         "face_quality", "face_yaw", "bibs", "img_width", "img_height",
         "face_vector_b64", "reid_vector_b64",
         "face_vector", "reid_vector", "_had_face",
+        "corrected_sod",
     )
 
     def __init__(self, frame_idx: int, photo_id: str, person_data: dict,
-                 img_width: int, img_height: int):
+                 img_width: int, img_height: int,
+                 corrected_sod: Optional[float] = None):
         self.frame_idx = frame_idx
         self.photo_id = photo_id
+        self.corrected_sod = corrected_sod
         self.bbox = person_data["bbox"]
         self.confidence = person_data["confidence"]
         self.is_blurry = person_data.get("is_blurry", False)
@@ -412,7 +415,10 @@ def cluster_burst_detections(
         img_w = img.get("img_width", 1920)
         img_h = img.get("img_height", 1280)
 
-        crops = [CropDetection(frame_idx, pid, p, img_w, img_h)
+        _ct = _parse_corrected_time(img.get("corrected_time"))
+        _sod = _photo_epoch_to_sod(_ct) if _ct is not None else None
+
+        crops = [CropDetection(frame_idx, pid, p, img_w, img_h, _sod)
                  for p in img["persons"]]
 
         # Hard gate: faceless rejection
@@ -551,6 +557,7 @@ def run_cascade(
     timed_participants: Dict[str, float],
     burst_sod: Optional[float] = None,
     registered_bibs: Optional[set] = None,
+    project_id: Optional[str] = None,
 ) -> None:
     """Apply the 13-rule deterministic cascade to resolve cluster identities.
 
@@ -660,20 +667,69 @@ def run_cascade(
             unassigned.remove(c)
 
     # ── Evaluate remaining clusters (no OCR) ──────────────────────
-    avail_hints = burst_hints - claimed_hints
     bio_clusters = [c for c in unassigned if c.has_valid_biometrics()]
 
-    # ── Rule 4: 1:1 Blind Trust ──────────────────────────────────
-    if (len(avail_hints) == 1 and len(bio_clusters) == 1
-            and len(burst_hints) == 1):
-        bio_clusters[0].assign(list(avail_hints)[0], "blind_trust")
-        unassigned.remove(bio_clusters[0])
+    # ── Per-cluster hint pools (Solution A) ───────────────────────
+    #   Each bio cluster sees only hints whose finish_time is within
+    #   ±HINT_WINDOW_S of its member photos' corrected_times.
+    for c in bio_clusters:
+        sods = {d.corrected_sod for d in c.detections
+                if d.corrected_sod is not None}
+        c_hints: Set[str] = set()
+        for sod in sods:
+            for bib, fsod in timed_participants.items():
+                if abs(sod - fsod) <= _cfg.HINT_WINDOW_S:
+                    c_hints.add(bib)
+        c._cluster_hints = c_hints
 
-    # ── Rule 5: Deductive Remainder ──────────────────────────────
-    elif (len(avail_hints) == 1 and len(bio_clusters) == 1
-              and len(claimed_hints) > 0):
-        bio_clusters[0].assign(list(avail_hints)[0], "hint_remainder")
-        unassigned.remove(bio_clusters[0])
+    # ── Deductive Elimination (Solution B) ────────────────────────
+    #   For each unclaimed hint that already has a confirmed identity
+    #   in the DB, try to biometrically match it to a remaining bio
+    #   cluster.  This resolves "phantom" clusters/hints from runners
+    #   identified in other bursts.
+    if project_id and bio_clusters:
+        global_avail = burst_hints - claimed_hints
+        known = db.load_identity_centroids(project_id, global_avail)
+        for bib, (face_c, reid_c) in known.items():
+            for c in list(bio_clusters):
+                if bib not in (c._cluster_hints - claimed_hints):
+                    continue
+                face_sim = _reid_cosine(c.best_face_vec, face_c)
+                reid_sim = _reid_cosine(c.blended_reid_vec, reid_c)
+                if (face_sim >= _cfg.CASCADE_FACE_STRICT
+                        or (reid_sim >= _cfg.CASCADE_REID_STRONG
+                            and face_sim >= _cfg.CASCADE_FACE_SOFT)):
+                    c.assign(bib, "deductive_known")
+                    claimed_hints.add(bib)
+                    unassigned.remove(c)
+                    bio_clusters.remove(c)
+                    break
+
+    # ── Rules 4 & 5: Per-cluster hint remainder ───────────────────
+    #   Iterative: claiming one hint may free another cluster's pool
+    #   to a single candidate.
+    changed = True
+    while changed:
+        changed = False
+        for c in list(bio_clusters):
+            c_avail = c._cluster_hints - claimed_hints
+            if len(c_avail) != 1:
+                continue
+            hint = next(iter(c_avail))
+            # If another bio cluster also has this as its sole hint, skip
+            if any(x is not c
+                   and (x._cluster_hints - claimed_hints) == {hint}
+                   for x in bio_clusters):
+                continue
+            mtype = ("blind_trust"
+                     if not claimed_hints and len(burst_hints) == 1
+                     else "hint_remainder")
+            c.assign(hint, mtype)
+            claimed_hints.add(hint)
+            unassigned.remove(c)
+            bio_clusters.remove(c)
+            changed = True
+            break  # restart scan after mutation
 
     # ── Rules 7 & 8: Spectator Veto / Ambiguous Pack → ghost ────
     for c in list(unassigned):
@@ -891,7 +947,7 @@ def process_payload(payload: dict) -> bool:
 
     # ── Phase 2: Deterministic Cascade ────────────────────────────
     registered_bibs = _ref_cache.get_registered_bibs(project_id)
-    run_cascade(clusters, burst_hints, valid_bibs, timed_participants, burst_sod, registered_bibs)
+    run_cascade(clusters, burst_hints, valid_bibs, timed_participants, burst_sod, registered_bibs, project_id)
 
     matched = [c for c in clusters if c.assigned_bib]
     ghosts = sum(1 for c in clusters if c.match_type and "ghost" in c.match_type)

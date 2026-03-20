@@ -914,6 +914,40 @@ def adopt_ghosts_for_bib(cur, project_id: str, bib: str) -> tuple:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Deductive Identity Lookup
+# ═══════════════════════════════════════════════════════════════════
+
+def load_identity_centroids(
+    project_id: str, bibs: set,
+) -> Dict[str, Tuple[Optional[np.ndarray], Optional[np.ndarray]]]:
+    """Return {bib: (face_centroid, reid_centroid)} for bibs that already
+    have confirmed (non-ghost) identities in the DB.
+
+    Used by the deductive elimination step in the cascade to recognise
+    bio clusters that match runners identified in other bursts.
+    """
+    if not bibs:
+        return {}
+    bib_list = sorted(bibs)
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT bib, face_centroid, reid_centroid
+            FROM   pipeline.identities
+            WHERE  project_id = %s
+              AND  bib = ANY(%s)
+              AND  bib IS NOT NULL
+              AND  face_centroid IS NOT NULL
+        """, (project_id, bib_list))
+        rows = cur.fetchall()
+    result: Dict[str, Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = {}
+    for bib, face_c, reid_c in rows:
+        face_vec = np.array(face_c, dtype=np.float32) if face_c is not None else None
+        reid_vec = np.array(reid_c, dtype=np.float32) if reid_c is not None else None
+        result[bib] = (face_vec, reid_vec)
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Bib Compatibility
 # ═══════════════════════════════════════════════════════════════════
 
