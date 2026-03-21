@@ -573,6 +573,25 @@ def run_cascade(
     unassigned = list(unassigned)
     claimed_hints: Set[str] = set()
 
+    # ── Co-Photo Exclusion Map ────────────────────────────────
+    # Clusters sharing a photo_id are proven to be different people.
+    # Build {cluster_index: set of consensus bibs from co-photo peers}
+    # so that cascade rules never assign cluster X a bib that belongs
+    # to a sibling cluster visible in the same frame.
+    _cidx: Dict[int, int] = {id(c): i for i, c in enumerate(clusters)}
+    _photo_to_cidxs: Dict[str, Set[int]] = defaultdict(set)
+    for _ci, _c in enumerate(clusters):
+        for _pid in _c.photo_ids:
+            _photo_to_cidxs[_pid].add(_ci)
+    _co_photo_bibs: Dict[int, Set[str]] = defaultdict(set)
+    for _cluster_idxs in _photo_to_cidxs.values():
+        if len(_cluster_idxs) < 2:
+            continue
+        for _ci in _cluster_idxs:
+            for _cj in _cluster_idxs:
+                if _ci != _cj and clusters[_cj].consensus_bib:
+                    _co_photo_bibs[_ci].add(clusters[_cj].consensus_bib)
+
     for c in list(unassigned):
         # ── Rule 11: Multi-Bib Collision ──────────────────────────
         if c.has_multiple_conflicting_high_conf_bibs(
@@ -604,10 +623,17 @@ def run_cascade(
 
             # ── Rule 2: Partial Golden (1:1 substring match) ──────
             if len(compatible) == 1:
-                c.assign(compatible[0], "golden_partial")
-                claimed_hints.add(compatible[0])
-                unassigned.remove(c)
-                continue
+                # Co-Photo Exclusion: if a sibling cluster in the same
+                # frame already owns this bib reading, they are proven
+                # different people — do not cross-assign.
+                _ci2 = _cidx[id(c)]
+                if compatible[0] in _co_photo_bibs.get(_ci2, set()):
+                    pass  # fall through to later rules
+                else:
+                    c.assign(compatible[0], "golden_partial")
+                    claimed_hints.add(compatible[0])
+                    unassigned.remove(c)
+                    continue
 
             # ── Rule 3: Error-Map Rescue ──────────────────────────
             if c.consensus_bib in _cfg.OCR_ERROR_MAP:
@@ -630,10 +656,13 @@ def run_cascade(
                         # timing-compatible alternative exists via
                         # bib_is_compatible (e.g. OCR "3907" → bib 3947
                         # whose finish_time is only seconds away).
+                        _ci3 = _cidx[id(c)]
+                        _excl3 = _co_photo_bibs.get(_ci3, set())
                         timing_rescues = [
                             bib for bib, fsod in timed_participants.items()
                             if bib != c.consensus_bib
                             and bib not in claimed_hints
+                            and bib not in _excl3
                             and db.bib_is_compatible(c.consensus_bib, bib)
                             and abs(burst_sod - fsod) <= _cfg.DELAYED_MAX_DELTA_S
                         ]

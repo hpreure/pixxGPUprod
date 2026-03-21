@@ -269,6 +269,121 @@ class _SegPersonDetector:
         return all_results
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Native TRT YOLO detect-only wrapper  (bib / text — pre-allocated buffers)
+# ──────────────────────────────────────────────────────────────────────────
+
+class _YOLODetector:
+    """
+    Native TRT wrapper for detect-only YOLO engines (bib, text).
+
+    Pre-allocates max-size input + output GPU buffers at __init__ and
+    reuses them every call via slicing + .copy_().  This eliminates the
+    per-call CUDA tensor creation/destruction that Ultralytics .predict()
+    performs — the root cause of 30-50 s VRAM fragmentation stalls.
+
+    Engine IO (NMS already baked in at export):
+      input   "images"  (B, 3, imgsz, imgsz)  FP32
+      output  "output0" (B, 300, 6)            FP32  [x1,y1,x2,y2,conf,cls]
+    """
+
+    MAX_BATCH = 32
+
+    def __init__(self, engine_path: str, imgsz: int, device: str = "cuda:0"):
+        self.imgsz = imgsz
+        self.device = device
+
+        _TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+        engine_path = Path(engine_path)
+        if not engine_path.exists():
+            raise FileNotFoundError(
+                f"YOLO detect engine not found: {engine_path}\n"
+                f"Run scripts/build_yolo26_engines.py to build it."
+            )
+
+        logger.info("yolo_detector_loading", engine=engine_path.name, imgsz=imgsz)
+        runtime = trt.Runtime(_TRT_LOGGER)
+        with open(engine_path, "rb") as f:
+            self._engine = runtime.deserialize_cuda_engine(f.read())
+        self._ctx = self._engine.create_execution_context()
+        self._stream = torch.cuda.current_stream().cuda_stream
+
+        # ── Pre-allocate max-size buffers (pinned for entire process) ──
+        self._inp_buf = torch.zeros(
+            self.MAX_BATCH, 3, imgsz, imgsz,
+            dtype=torch.float32, device=device,
+        )
+        self._out_buf = torch.zeros(
+            self.MAX_BATCH, 300, 6,
+            dtype=torch.float32, device=device,
+        )
+        logger.info(
+            "yolo_detector_ready",
+            engine=engine_path.name,
+            inp_MB=round(self._inp_buf.nelement() * 4 / 1e6, 1),
+            out_MB=round(self._out_buf.nelement() * 4 / 1e6, 1),
+        )
+
+    # ── Preprocessing ─────────────────────────────────────────────
+
+    @staticmethod
+    def _preprocess_crop(img_bgr: np.ndarray, imgsz: int) -> torch.Tensor:
+        """BGR HWC uint8 → RGB CHW float32 [0,1].  Caller already resized."""
+        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        return torch.from_numpy(rgb).permute(2, 0, 1)          # (3, H, W)
+
+    # ── Public API ────────────────────────────────────────────────
+
+    def detect_batch(
+        self,
+        images_bgr: List[np.ndarray],
+        conf: float = 0.25,
+    ) -> List[np.ndarray]:
+        """
+        Run batched detection on pre-resized BGR crops.
+
+        Args:
+            images_bgr: list of BGR uint8 numpy arrays, already resized to
+                        (imgsz × imgsz).
+            conf:       minimum confidence threshold.
+
+        Returns:
+            List (one per image) of Nx6 float32 numpy arrays
+            ``[x1, y1, x2, y2, conf, cls]``.  Empty (0,6) array if no dets.
+        """
+        n = len(images_bgr)
+        if n == 0:
+            return []
+
+        all_results: List[np.ndarray] = []
+
+        for start in range(0, n, self.MAX_BATCH):
+            chunk = images_bgr[start:start + self.MAX_BATCH]
+            B = len(chunk)
+
+            # Build batch tensor on CPU, copy into pre-allocated GPU buffer
+            batch_cpu = torch.stack([
+                self._preprocess_crop(img, self.imgsz) for img in chunk
+            ])                                                   # (B, 3, H, W)
+            self._inp_buf[:B].copy_(batch_cpu)
+
+            # Bind sliced views and execute
+            self._ctx.set_input_shape("images", (B, 3, self.imgsz, self.imgsz))
+            self._ctx.set_tensor_address("images", self._inp_buf.data_ptr())
+            self._ctx.set_tensor_address("output0", self._out_buf.data_ptr())
+            self._ctx.execute_async_v3(self._stream)
+            torch.cuda.synchronize()
+
+            # Read results and apply confidence filter
+            raw = self._out_buf[:B].cpu().numpy()                # (B, 300, 6)
+            for bi in range(B):
+                dets = raw[bi]                                   # (300, 6)
+                mask = dets[:, 4] >= conf
+                all_results.append(dets[mask].copy())            # (K, 6)
+
+        return all_results
+
+
 # Model loading profiles
 PROFILE_PROBE = "probe"          # YOLO person + bib + text + OCR only
 PROFILE_FULL  = "full"           # Everything: YOLO + OCR + ReID + Face
@@ -276,10 +391,9 @@ PROFILE_FULL  = "full"           # Everything: YOLO + OCR + ReID + Face
 
 # How often to flush the CUDA caching allocator's free-block pool.
 # After this many process_photos() calls, torch.cuda.empty_cache()
-# is invoked proactively.  This prevents gradual VRAM fragmentation
-# that causes 30-50 s stalls when the allocator finally needs to
-# walk thousands of cached blocks (observed 2026-03-12).
-_CUDA_CACHE_FLUSH_INTERVAL = 200
+# is invoked proactively.  Reduced from 200 → 50 on 2026-03-20 as
+# additional safety net alongside the _YOLODetector rewrite.
+_CUDA_CACHE_FLUSH_INTERVAL = 50
 
 # Log a warning when any pipeline phase exceeds this threshold.
 _STALL_WARN_MS = 5_000
@@ -326,21 +440,20 @@ class InferenceEngine:
         if self._loaded_profile == profile:
             return
 
-        from ultralytics import YOLO
-
         if self.seg_detector is None:
             logger.info("models_loading", profile=profile)
             self.seg_detector = _SegPersonDetector(
                 engine_path=Path(settings.YOLO_PERSON_MODEL), device=self.device
             )
 
-            self.yolo_bib = YOLO(settings.YOLO_BIB_MODEL, task="detect")
-            if settings.YOLO_BIB_MODEL.endswith(".pt"):
-                self.yolo_bib.to(self.device)
-
-            self.yolo_text = YOLO(settings.YOLO_TEXT_MODEL, task="detect")
-            if settings.YOLO_TEXT_MODEL.endswith(".pt"):
-                self.yolo_text.to(self.device)
+            self.yolo_bib = _YOLODetector(
+                engine_path=settings.YOLO_BIB_MODEL,
+                imgsz=640, device=self.device,
+            )
+            self.yolo_text = _YOLODetector(
+                engine_path=settings.YOLO_TEXT_MODEL,
+                imgsz=320, device=self.device,
+            )
 
         if self.ocr_model is None:
             logger.info("model_loading", model="PARSeq")
@@ -616,6 +729,117 @@ class InferenceEngine:
                 total_dropped=len(_faceless_dropped),
             )
 
+        # ── Stage E: faceless rescue for zero-survivor images ─────
+        # When faceless rejection kills every person in an image (e.g. a
+        # dominant back-facing runner inflated the anchor and the only
+        # anchor survivor had no face), re-scan raw_boxes with a relaxed
+        # anchor and run InsightFace on candidates.  Any with a face are
+        # added as survivors.  Only fires on images that currently have
+        # zero persons, so it cannot degrade existing correct results.
+        if _has_face_model:
+            _rescue_factor = detection_settings.RESCUE_ANCHOR_FACTOR
+            _rescue_pct = _anchor_pct * _rescue_factor
+            _zero_imgs = {
+                img_i for img_i in range(len(images))
+                if not per_image_person_boxes[img_i]
+            }
+            if _zero_imgs:
+                # Collect rescue candidates: raw detections that failed
+                # the original anchor but pass the relaxed one.
+                _rescue_cands = []  # same tuple shape as anchor_survivors
+                for img_i, x1, y1, x2, y2, conf, h, w, seg_mask in raw_boxes:
+                    if img_i not in _zero_imgs:
+                        continue
+                    person_area = (x2 - x1) * (y2 - y1)
+                    _rescue_min = _per_image_anchor.get(img_i, 1.0) * _rescue_pct
+                    if person_area < _rescue_min:
+                        continue
+                    raw_crop = images[img_i][1][y1:y2, x1:x2].copy()
+                    if raw_crop.size > 0:
+                        gray = cv2.cvtColor(raw_crop, cv2.COLOR_BGR2GRAY)
+                        blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                    else:
+                        blur_score = 0.0
+                    is_blurry = _blur_thresh > 0.0 and blur_score < _blur_thresh
+                    _rescue_cands.append(
+                        (img_i, x1, y1, x2, y2, conf, raw_crop, seg_mask, blur_score, is_blurry)
+                    )
+
+                # Cap rescue candidates per image (same MAX_PERSONS_PER_IMAGE)
+                _rescue_buckets: Dict[int, list] = {}
+                for rc in _rescue_cands:
+                    _rescue_buckets.setdefault(rc[0], []).append(rc)
+                _rescue_capped = []
+                for img_i_r, entries_r in _rescue_buckets.items():
+                    if _max_per_img > 0 and len(entries_r) > _max_per_img:
+                        entries_r.sort(
+                            key=lambda t: t[5] * float((t[3] - t[1]) * (t[4] - t[2])),
+                            reverse=True,
+                        )
+                        entries_r = entries_r[:_max_per_img]
+                    _rescue_capped.extend(entries_r)
+
+                # Run InsightFace on rescue candidates
+                if _rescue_capped:
+                    _rescue_face = [None] * len(_rescue_capped)
+                    try:
+                        _rf_crops = [rc[6] for rc in _rescue_capped]
+                        _rf_masks: List[Optional[np.ndarray]] = []
+                        for rc in _rescue_capped:
+                            fm = rc[7]
+                            if fm is not None:
+                                _rf_masks.append(fm[rc[2]:rc[4], rc[1]:rc[3]])
+                            else:
+                                _rf_masks.append(None)
+                        _rf_hints = []
+                        for rc in _rescue_capped:
+                            _pp = photo_paths[images[rc[0]][0]] if rc[0] < len(images) else "?"
+                            _rf_hints.append(_pp.rsplit("/", 1)[-1] if "/" in str(_pp) else str(_pp))
+                        _rf_results = self.face_model.extract(
+                            _rf_crops, seg_masks=_rf_masks, photo_hints=_rf_hints
+                        )
+                        for ri, fr in enumerate(_rf_results):
+                            if fr and fr.get('embedding') is not None:
+                                _rescue_face[ri] = fr
+                    except Exception as e:
+                        logger.warning("rescue_face_failed", error=str(e))
+
+                    # Add faced rescue candidates as survivors
+                    _rescued_count = 0
+                    for ri, rc in enumerate(_rescue_capped):
+                        if _rescue_face[ri] is None:
+                            continue
+                        img_i, x1, y1, x2, y2, conf, raw_crop, seg_mask, blur_score, is_blurry = rc
+                        person_idx = len(per_image_person_boxes[img_i])
+                        per_image_person_boxes[img_i].append((x1, y1, x2, y2, conf))
+                        crop_map.append((img_i, person_idx, blur_score, is_blurry))
+                        face_kept.append(_rescue_face[ri])
+
+                        masked_crop = raw_crop.copy()
+                        crop_mask = None
+                        if seg_mask is not None:
+                            crop_mask = seg_mask[y1:y2, x1:x2]
+                            if crop_mask.shape == masked_crop.shape[:2]:
+                                masked_crop = np.where(
+                                    crop_mask[:, :, None].astype(bool),
+                                    masked_crop,
+                                    np.full_like(masked_crop, 128),
+                                )
+                            else:
+                                crop_mask = None
+                        gpu_crops_reid.append(masked_crop)
+                        gpu_crops_raw.append((raw_crop, crop_mask))
+                        _rescued_count += 1
+
+                    if _rescued_count > 0:
+                        total_persons = len(crop_map)
+                        total_gpu = len(gpu_crops_reid)
+                        logger.info("faceless_rescue",
+                            zero_images=len(_zero_imgs),
+                            rescue_candidates=len(_rescue_capped),
+                            rescued=_rescued_count,
+                        )
+
         # ── 3. Batched ReID extraction — masked crops (survivors only) ──
         all_reid_gpu = [None] * total_gpu
         if self.reid_model is not None and total_gpu > 0:
@@ -759,22 +983,10 @@ class InferenceEngine:
         crop_scales_x = [c.shape[1] / 640.0 for c in person_crops]
         crop_scales_y = [c.shape[0] / 640.0 for c in person_crops]
 
-        # ── Phase B: bib YOLO — batched call across all person crops ────
-        # Ultralytics stream_inference has an IndexError when the batch is
-        # very large (typically >32) because the TRT engine splits internally
-        # and the results list length can mis-match.  Chunk to _YOLO_BATCH_MAX.
-        _YOLO_BATCH_MAX = 32
-        bib_batch_results: List = []
-        for _start in range(0, n, _YOLO_BATCH_MAX):
-            _chunk = resized_crops[_start:_start + _YOLO_BATCH_MAX]
-            _raw = self.yolo_bib.predict(
-                _chunk, conf=0.1, verbose=False, half=True, imgsz=640,
-            )
-            _raw_list = list(_raw) if _raw else []
-            # Prevent silent list shifts if Ultralytics drops trailing empty results
-            if len(_raw_list) < len(_chunk):
-                _raw_list.extend([None] * (len(_chunk) - len(_raw_list)))
-            bib_batch_results.extend(_raw_list[:len(_chunk)])
+        # ── Phase B: bib YOLO — native TRT batched detection ─────────
+        # _YOLODetector.detect_batch() handles chunking to MAX_BATCH=32
+        # internally and returns List[np.ndarray] of (K,6) per image.
+        bib_batch_results = self.yolo_bib.detect_batch(resized_crops, conf=0.1)
 
         # ── Phase C: collect all bib crops and text detect them ─────
         # bib_crops_info: (person_idx, bib_box_in_resized, bib_crop)
@@ -784,11 +996,11 @@ class InferenceEngine:
         # Group raw bib detections per person crop so we can pick the
         # best-overlapping bib when multiple are detected.
         per_crop_bibs: Dict[int, list] = {}   # pi → [(x1_640, y1_640, x2_640, y2_640, orig_xyxy)]
-        for pi, det_result in enumerate(bib_batch_results):
-            if det_result is None or det_result.boxes is None:
+        for pi, dets in enumerate(bib_batch_results):
+            if dets is None or len(dets) == 0:
                 continue
-            for bib_box in det_result.boxes:
-                x1, y1, x2, y2 = map(int, bib_box.xyxy[0].cpu().numpy())
+            for det in dets:
+                x1, y1, x2, y2 = int(det[0]), int(det[1]), int(det[2]), int(det[3])
                 orig_x1 = int(x1 * crop_scales_x[pi])
                 orig_y1 = int(y1 * crop_scales_y[pi])
                 orig_x2 = int(x2 * crop_scales_x[pi])
@@ -857,17 +1069,8 @@ class InferenceEngine:
             for bc in bib_crops
         ]
 
-        # Chunked for the same reason as Phase B — avoid Ultralytics IndexError.
-        text_batch_results: List = []
-        for _start in range(0, len(text_inputs), _YOLO_BATCH_MAX):
-            _chunk = text_inputs[_start:_start + _YOLO_BATCH_MAX]
-            _raw_text = self.yolo_text.predict(
-                _chunk, conf=0.5, verbose=False, half=True, imgsz=320,
-            )
-            _raw_list = list(_raw_text) if _raw_text else []
-            if len(_raw_list) < len(_chunk):
-                _raw_list.extend([None] * (len(_chunk) - len(_raw_list)))
-            text_batch_results.extend(_raw_list[:len(_chunk)])
+        # _YOLODetector.detect_batch() handles chunking internally.
+        text_batch_results = self.yolo_text.detect_batch(text_inputs, conf=0.5)
 
         # ── Phase E: extract OCR crop (text region or full bib) ─────
         ocr_crops = []
@@ -875,9 +1078,8 @@ class InferenceEngine:
 
         for bi, (bib_crop, text_det) in enumerate(zip(bib_crops, text_batch_results)):
             ocr_crop = bib_crop  # fallback: full bib
-            if text_det is not None and text_det.boxes is not None and len(text_det.boxes) > 0:
-                txt_box = text_det.boxes[0]
-                tx1, ty1, tx2, ty2 = map(int, txt_box.xyxy[0].cpu().numpy())
+            if text_det is not None and len(text_det) > 0:
+                tx1, ty1, tx2, ty2 = int(text_det[0][0]), int(text_det[0][1]), int(text_det[0][2]), int(text_det[0][3])
                 # Scale from 320 back to bib_crop dimensions
                 bh, bw = bib_crop.shape[:2]
                 tx1 = int(tx1 * bw / 320)

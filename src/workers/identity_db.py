@@ -881,8 +881,24 @@ def adopt_ghosts_for_bib(cur, project_id: str, bib: str) -> tuple:
     """, (matched_ghost_ids,))
     ghost_ocr_map = {str(r[0]): r[1] for r in cur.fetchall()}
 
+    # ── Co-Photo Exclusion: ghosts sharing a photo with the
+    #    confirmed identity are proven different people. ────────
+    cur.execute("""
+        SELECT DISTINCT gs.identity_id::text
+        FROM   pipeline.subjects gs
+        WHERE  gs.identity_id = ANY(%s::uuid[])
+          AND  EXISTS (
+                  SELECT 1 FROM pipeline.subjects cs
+                  WHERE  cs.identity_id = %s::uuid
+                    AND  cs.photo_id = gs.photo_id
+               )
+    """, (matched_ghost_ids, confirmed_id))
+    _co_photo_ghosts = {str(r[0]) for r in cur.fetchall()}
+
     vetted_ghost_ids: list[str] = []
     for gid in matched_ghost_ids:
+        if gid in _co_photo_ghosts:
+            continue
         ghost_bibs = ghost_ocr_map.get(gid, [])
         if any(gb != bib and not bib_is_compatible(gb, bib)
                for gb in ghost_bibs):

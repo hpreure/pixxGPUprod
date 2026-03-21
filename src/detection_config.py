@@ -192,6 +192,16 @@ class DetectionConfig:
     # and mid-distance runners sit at 0.5-1.5%).
     ANCHOR_AREA_MIN_PCT: float = 0.22
 
+    # Rescue multiplier for zero-subject images.  When faceless rejection
+    # eliminates every person in an image (typically a dominant back-facing
+    # runner inflating the anchor), re-scan raw detections with a relaxed
+    # anchor of ANCHOR_AREA_MIN_PCT × RESCUE_ANCHOR_FACTOR and keep any
+    # that have a detectable face.  Only fires on zero-survivor images so
+    # it cannot degrade existing results.
+    # Derivation: the two motivating photos (d111/a451) need ≤0.36 to
+    # rescue a faced runner at 8-10% of anchor area.  0.25 gives margin.
+    RESCUE_ANCHOR_FACTOR: float = 0.25
+
     # Maximum person detections to keep per image after anchor + face
     # filtering.  Survivors are ranked by confidence × area and the
     # top-N are kept.  Prevents pathological crowd scenes from
