@@ -9,10 +9,17 @@ is initialised before any ``structlog.get_logger()`` call::
 
 All workers share the same processor chain so that JSON output is
 consistent across the pipeline (Feeder → GPU → CPU → Scribe).
+
+Log output is written directly to a file (``logs/<worker>.log``) so that
+terminal pipe backpressure from ``| tee`` cannot stall the workers.
+The log-file path is derived from ``LOG_FILE`` env-var; when unset the
+default ``logs/worker.log`` is used.
 """
 
 import logging
+import os
 import sys
+from pathlib import Path
 
 import structlog
 
@@ -24,6 +31,14 @@ def configure() -> None:
     global _configured
     if _configured:
         return
+
+    log_file = os.environ.get("LOG_FILE", "")
+    if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        _file = open(log_file, "a", buffering=1)  # line-buffered
+    else:
+        _file = sys.stdout
+
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -36,7 +51,7 @@ def configure() -> None:
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=structlog.PrintLoggerFactory(file=_file),
         cache_logger_on_first_use=True,
     )
     _configured = True

@@ -698,18 +698,38 @@ def run_cascade(
     # ── Evaluate remaining clusters (no OCR) ──────────────────────
     bio_clusters = [c for c in unassigned if c.has_valid_biometrics()]
 
-    # ── Per-cluster hint pools (Solution A) ───────────────────────
-    #   Each bio cluster sees only hints whose finish_time is within
-    #   ±HINT_WINDOW_S of its member photos' corrected_times.
+    # ── Per-cluster hint pools ─────────────────────────────────────
+    #   Wide pool (±HINT_WINDOW_S): union across all detection sods.
+    #   Strict pool (±HINT_REMAINDER_STRICT_WINDOW_S): INTERSECTION
+    #   across detection sods — a bib must be within ±strict of EVERY
+    #   sod in the cluster.  Falls back to union if intersection is
+    #   empty.  This prevents adjacent-pack contamination when a
+    #   cluster spans second boundaries.
     for c in bio_clusters:
         sods = {d.corrected_sod for d in c.detections
                 if d.corrected_sod is not None}
         c_hints: Set[str] = set()
+        per_sod_strict: list = []
         for sod in sods:
+            sod_strict: Set[str] = set()
             for bib, fsod in timed_participants.items():
-                if abs(sod - fsod) <= _cfg.HINT_WINDOW_S:
+                delta = abs(sod - fsod)
+                if delta <= _cfg.HINT_WINDOW_S:
                     c_hints.add(bib)
+                if delta <= _cfg.HINT_REMAINDER_STRICT_WINDOW_S:
+                    sod_strict.add(bib)
+            per_sod_strict.append(sod_strict)
         c._cluster_hints = c_hints
+        if per_sod_strict:
+            c_strict = per_sod_strict[0]
+            for sh in per_sod_strict[1:]:
+                c_strict = c_strict & sh
+            # Fallback to union if intersection is empty
+            if not c_strict:
+                c_strict = set().union(*per_sod_strict)
+            c._cluster_hints_strict = c_strict
+        else:
+            c._cluster_hints_strict = set()
 
     # ── Deductive Elimination (Solution B) ────────────────────────
     #   For each unclaimed hint that already has a confirmed identity
@@ -737,22 +757,28 @@ def run_cascade(
     # ── Rules 4 & 5: Per-cluster hint remainder ───────────────────
     #   Iterative: claiming one hint may free another cluster's pool
     #   to a single candidate.
+    #   Rule 4 (blind_trust) uses the wider ±HINT_WINDOW_S pool.
+    #   Rule 5 (hint_remainder) uses the strict ±HINT_REMAINDER_STRICT_WINDOW_S pool
+    #   to avoid adjacent-pack contamination in deductive scenarios.
     changed = True
     while changed:
         changed = False
         for c in list(bio_clusters):
-            c_avail = c._cluster_hints - claimed_hints
+            is_blind = not claimed_hints and len(burst_hints) == 1
+            pool = (c._cluster_hints if is_blind
+                    else c._cluster_hints_strict)
+            c_avail = pool - claimed_hints
             if len(c_avail) != 1:
                 continue
             hint = next(iter(c_avail))
             # If another bio cluster also has this as its sole hint, skip
+            contention_pool = (lambda x: x._cluster_hints if is_blind
+                               else x._cluster_hints_strict)
             if any(x is not c
-                   and (x._cluster_hints - claimed_hints) == {hint}
+                   and (contention_pool(x) - claimed_hints) == {hint}
                    for x in bio_clusters):
                 continue
-            mtype = ("blind_trust"
-                     if not claimed_hints and len(burst_hints) == 1
-                     else "hint_remainder")
+            mtype = "blind_trust" if is_blind else "hint_remainder"
             c.assign(hint, mtype)
             claimed_hints.add(hint)
             unassigned.remove(c)

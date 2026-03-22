@@ -253,6 +253,15 @@ class DetectionConfig:
     # ±2 s covers jitter without pulling in adjacent pack finishers.
     HINT_WINDOW_S: float = 2.0
 
+    # Strict window used ONLY for Rule 5 (hint_remainder / deductive
+    # remainder).  Tighter than HINT_WINDOW_S to avoid pulling in
+    # adjacent-pack finishers whose timing falls between 1-2 s of the
+    # photo.  Empirically resolves +54 ghosts vs baseline with only
+    # 3 true-cost regressions (all genuinely ambiguous).  Rule 4
+    # (blind_trust) keeps the wider HINT_WINDOW_S because its solo-
+    # hint constraint already prevents contamination.
+    HINT_REMAINDER_STRICT_WINDOW_S: float = 1.0
+
     # Minimum separation (seconds) between the nearest and second-nearest
     # hint finish times for the proximity tiebreaker in blind trust.
     # When a single-cluster burst has multiple unclaimed hints and no OCR,

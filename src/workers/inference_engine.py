@@ -1042,7 +1042,7 @@ class InferenceEngine:
                     if s[0] >= _BIB_MIN_MASK_OVERLAP
                 ][:1]
                 if not candidates:
-                    logger.info("bib_rejected_off_mask",
+                    logger.debug("bib_rejected_off_mask",
                         person_idx=pi,
                         best_overlap=round(scored[0][0], 3) if scored else 0.0,
                     )
@@ -1114,14 +1114,9 @@ class InferenceEngine:
                 text = ocr_out.get('text', '')
                 ocr_conf = ocr_out.get('confidence', 0.0)
 
-                logger.info("raw_ocr_output",
+                logger.debug("raw_ocr_output",
                     person_crop_idx=pi, bbox=list(bib_box),
                     raw_text=text, confidence=round(ocr_conf, 4),
-                )
-
-                logger.debug("bib_pipeline_ocr",
-                    person_crop_idx=pi, bbox=list(bib_box),
-                    raw_text=text, confidence=round(ocr_conf, 3),
                 )
 
                 digits = re.findall(r'\d+', text)
