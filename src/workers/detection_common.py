@@ -117,21 +117,25 @@ def encrypt_vec(vec) -> Optional[bytes]:
 def parse_corrected_time(value) -> Optional[float]:
     """
     Convert corrected_time to epoch seconds (float).
-    Accepts:  float/int (epoch seconds), string "YYYY-MM-DD HH:MM:SS", or None.
+    Accepts:  float/int (epoch seconds),
+              string "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS.fff",
+              or None.
     """
     if value is None:
         return None
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
-        try:
-            dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-            return dt.timestamp()
-        except ValueError:
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
             try:
-                return float(value)
+                dt = datetime.strptime(value, fmt)
+                return dt.timestamp()
             except ValueError:
-                return None
+                continue
+        try:
+            return float(value)
+        except ValueError:
+            return None
     return None
 
 

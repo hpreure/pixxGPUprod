@@ -463,8 +463,21 @@ def cluster_burst_detections(
                         ocr_conflict = True
 
                 # ── 2. Hard Veto (Clearly different people) ──
+                # Exception: if both OCR reads are each compatible with
+                # a common timing hint, suppress the veto and let Step 4
+                # (biometric dual-gate) decide.  This bridges misreads
+                # like '319' and '3315' that are both partials of '3319'.
                 if ocr_conflict:
-                    continue
+                    if _hints:
+                        bridged = any(
+                            db.bib_is_compatible(crop_bib, h)
+                            and db.bib_is_compatible(cluster.consensus_bib, h)
+                            for h in _hints
+                        )
+                    else:
+                        bridged = False
+                    if not bridged:
+                        continue
 
                 # ── 3. Hint Disambiguation Veto (The 3223 vs 3224 collision) ──
                 # STRICTLY _hints only. If they are both physically on the mat,
@@ -696,97 +709,97 @@ def run_cascade(
             unassigned.remove(c)
 
     # ── Evaluate remaining clusters (no OCR) ──────────────────────
+    #   Unified non-OCR assignment: timing-eligible hints are scored
+    #   against each bio cluster using negative exclusion from claimed
+    #   identities, then assigned greedily (best pair first).
     bio_clusters = [c for c in unassigned if c.has_valid_biometrics()]
+    avail_hints = burst_hints - claimed_hints
 
-    # ── Per-cluster hint pools ─────────────────────────────────────
-    #   Wide pool (±HINT_WINDOW_S): union across all detection sods.
-    #   Strict pool (±HINT_REMAINDER_STRICT_WINDOW_S): INTERSECTION
-    #   across detection sods — a bib must be within ±strict of EVERY
-    #   sod in the cluster.  Falls back to union if intersection is
-    #   empty.  This prevents adjacent-pack contamination when a
-    #   cluster spans second boundaries.
-    for c in bio_clusters:
-        sods = {d.corrected_sod for d in c.detections
-                if d.corrected_sod is not None}
-        c_hints: Set[str] = set()
-        per_sod_strict: list = []
-        for sod in sods:
-            sod_strict: Set[str] = set()
-            for bib, fsod in timed_participants.items():
-                delta = abs(sod - fsod)
-                if delta <= _cfg.HINT_WINDOW_S:
-                    c_hints.add(bib)
-                if delta <= _cfg.HINT_REMAINDER_STRICT_WINDOW_S:
-                    sod_strict.add(bib)
-            per_sod_strict.append(sod_strict)
-        c._cluster_hints = c_hints
-        if per_sod_strict:
-            c_strict = per_sod_strict[0]
-            for sh in per_sod_strict[1:]:
-                c_strict = c_strict & sh
-            # Fallback to union if intersection is empty
-            if not c_strict:
-                c_strict = set().union(*per_sod_strict)
-            c._cluster_hints_strict = c_strict
-        else:
-            c._cluster_hints_strict = set()
+    if bio_clusters and avail_hints:
+        # 1. Per-cluster timing pool (±HINT_WINDOW_S from any detection sod)
+        for c in bio_clusters:
+            sods = {d.corrected_sod for d in c.detections
+                    if d.corrected_sod is not None}
+            c._cluster_hints: Set[str] = set()
+            for sod in sods:
+                for bib, fsod in timed_participants.items():
+                    if abs(sod - fsod) <= _cfg.HINT_WINDOW_S:
+                        c._cluster_hints.add(bib)
 
-    # ── Deductive Elimination (Solution B) ────────────────────────
-    #   For each unclaimed hint that already has a confirmed identity
-    #   in the DB, try to biometrically match it to a remaining bio
-    #   cluster.  This resolves "phantom" clusters/hints from runners
-    #   identified in other bursts.
-    if project_id and bio_clusters:
-        global_avail = burst_hints - claimed_hints
-        known = db.load_identity_centroids(project_id, global_avail)
-        for bib, (face_c, reid_c) in known.items():
-            for c in list(bio_clusters):
-                if bib not in (c._cluster_hints - claimed_hints):
-                    continue
-                face_sim = _reid_cosine(c.best_face_vec, face_c)
-                reid_sim = _reid_cosine(c.blended_reid_vec, reid_c)
-                if (face_sim >= _cfg.CASCADE_FACE_STRICT
-                        or (reid_sim >= _cfg.CASCADE_REID_STRONG
-                            and face_sim >= _cfg.CASCADE_FACE_SOFT)):
-                    c.assign(bib, "deductive_known")
-                    claimed_hints.add(bib)
-                    unassigned.remove(c)
-                    bio_clusters.remove(c)
-                    break
+        # 2. Load centroids for bibs claimed by OCR in this burst
+        #    so we can use negative exclusion (dissimilarity to claimed
+        #    bibs = positive evidence for unclaimed ones).
+        claimed_centroids: Dict[str, Tuple] = {}
+        if project_id and claimed_hints:
+            claimed_centroids = db.load_identity_centroids(
+                project_id, claimed_hints)
 
-    # ── Rules 4 & 5: Per-cluster hint remainder ───────────────────
-    #   Iterative: claiming one hint may free another cluster's pool
-    #   to a single candidate.
-    #   Rule 4 (blind_trust) uses the wider ±HINT_WINDOW_S pool.
-    #   Rule 5 (hint_remainder) uses the strict ±HINT_REMAINDER_STRICT_WINDOW_S pool
-    #   to avoid adjacent-pack contamination in deductive scenarios.
-    changed = True
-    while changed:
-        changed = False
-        for c in list(bio_clusters):
+        # 3. Score every (bio_cluster, unclaimed_hint) pair
+        #    Score = number of detections (larger cluster = more likely
+        #    the real runner) + timing proximity bonus + negative
+        #    exclusion bonus (dissimilarity to all claimed bibs).
+        candidates: list = []  # (score, cluster, hint)
+        for c in bio_clusters:
+            c_avail = (c._cluster_hints & avail_hints)
+            if not c_avail:
+                continue
+            # Compute max dissimilarity from claimed bibs (negative exclusion)
+            neg_face = 0.0
+            neg_reid = 0.0
+            if claimed_centroids:
+                face_sims = []
+                reid_sims = []
+                for _bib, (fc, rc) in claimed_centroids.items():
+                    fs = _reid_cosine(c.best_face_vec, fc)
+                    rs = _reid_cosine(c.blended_reid_vec, rc)
+                    if fs > 0:
+                        face_sims.append(fs)
+                    if rs > 0:
+                        reid_sims.append(rs)
+                # Lower similarity to claimed = higher negative exclusion score
+                if face_sims:
+                    neg_face = 1.0 - max(face_sims)
+                if reid_sims:
+                    neg_reid = 1.0 - max(reid_sims)
+
+            for hint in c_avail:
+                # Timing proximity: how close is the hint's finish to
+                # the cluster's median detection sod?
+                sods_list = [d.corrected_sod for d in c.detections
+                             if d.corrected_sod is not None]
+                if sods_list:
+                    median_sod = sorted(sods_list)[len(sods_list) // 2]
+                    fsod = timed_participants[hint]
+                    time_prox = max(0.0, 1.0 - abs(median_sod - fsod)
+                                    / _cfg.HINT_WINDOW_S)
+                else:
+                    time_prox = 0.0
+
+                score = (
+                    len(c.detections) * 0.1      # cluster size
+                    + time_prox * 2.0             # timing proximity (0-2)
+                    + neg_face * 1.0              # face dissimilarity to claimed
+                    + neg_reid * 1.0              # reid dissimilarity to claimed
+                )
+                candidates.append((score, c, hint))
+
+        # 4. Greedy assignment: best score first, one hint per cluster
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        assigned_clusters: Set[int] = set()
+        assigned_bibs: Set[str] = set()
+        for score, c, hint in candidates:
+            if id(c) in assigned_clusters or hint in assigned_bibs:
+                continue
             is_blind = not claimed_hints and len(burst_hints) == 1
-            pool = (c._cluster_hints if is_blind
-                    else c._cluster_hints_strict)
-            c_avail = pool - claimed_hints
-            if len(c_avail) != 1:
-                continue
-            hint = next(iter(c_avail))
-            # If another bio cluster also has this as its sole hint, skip
-            contention_pool = (lambda x: x._cluster_hints if is_blind
-                               else x._cluster_hints_strict)
-            if any(x is not c
-                   and (contention_pool(x) - claimed_hints) == {hint}
-                   for x in bio_clusters):
-                continue
             mtype = "blind_trust" if is_blind else "hint_remainder"
             c.assign(hint, mtype)
             claimed_hints.add(hint)
+            assigned_bibs.add(hint)
+            assigned_clusters.add(id(c))
             unassigned.remove(c)
             bio_clusters.remove(c)
-            changed = True
-            break  # restart scan after mutation
 
-    # ── Rules 7 & 8: Spectator Veto / Ambiguous Pack → ghost ────
+    # ── Everything else → ghost ───────────────────────────────────
     for c in list(unassigned):
         c.assign(None, "ghost")
 

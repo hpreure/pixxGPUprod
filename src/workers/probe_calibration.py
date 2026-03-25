@@ -118,7 +118,8 @@ class ProbeCalibration:
             photo_seconds = (
                 photo_dt.hour * 3600 +
                 photo_dt.minute * 60 +
-                photo_dt.second
+                photo_dt.second +
+                photo_dt.microsecond / 1e6
             )
             
             # Check each person for OCR matches
@@ -149,9 +150,9 @@ class ProbeCalibration:
                         
                         logger.info(
                             f"Match: bib={bib_num}, "
-                            f"photo_clock={photo_dt.strftime('%H:%M:%S')}, "
+                            f"photo_clock={photo_dt.strftime('%H:%M:%S.%f')[:12]}, "
                             f"finish={finish_time_str}, "
-                            f"delta={delta:.0f}s"
+                            f"delta={delta:.2f}s"
                         )
                     
                     except Exception as e:

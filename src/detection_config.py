@@ -207,7 +207,7 @@ class DetectionConfig:
     # top-N are kept.  Prevents pathological crowd scenes from
     # starving the GPU with 20+ crops through ReID / bib / OCR.
     # Set to 0 to disable.
-    MAX_PERSONS_PER_IMAGE: int = 7
+    MAX_PERSONS_PER_IMAGE: int = 6
 
     # ==========================================
     # 2. EDGE EXCLUSION ZONES (letterbox mask)
@@ -218,8 +218,8 @@ class DetectionConfig:
     # This eliminates edge spectators, partial-body close-passers,
     # and lens-distortion artifacts without any post-filter leaks.
     # History: 0.15 → 0.08 → removed → restored at 0.10 (Feb 2026).
-    ZONE_LEFT_PCT: float = 0.10
-    ZONE_RIGHT_PCT: float = 0.10
+    ZONE_LEFT_PCT: float = 0.15
+    ZONE_RIGHT_PCT: float = 0.15
 
     # ==========================================
     # 3. SOFT QUALITY MARKERS
@@ -255,12 +255,10 @@ class DetectionConfig:
 
     # Strict window used ONLY for Rule 5 (hint_remainder / deductive
     # remainder).  Tighter than HINT_WINDOW_S to avoid pulling in
-    # adjacent-pack finishers whose timing falls between 1-2 s of the
-    # photo.  Empirically resolves +54 ghosts vs baseline with only
-    # 3 true-cost regressions (all genuinely ambiguous).  Rule 4
-    # (blind_trust) keeps the wider HINT_WINDOW_S because its solo-
-    # hint constraint already prevents contamination.
-    HINT_REMAINDER_STRICT_WINDOW_S: float = 1.0
+    # (Deprecated) Was used by the old strict-intersection pool for Rule 5.
+    # The unified non-OCR scoring now uses HINT_WINDOW_S for all timing
+    # pools.  Kept temporarily for reference; safe to remove.
+    # HINT_REMAINDER_STRICT_WINDOW_S: float = 1.0
 
     # Minimum separation (seconds) between the nearest and second-nearest
     # hint finish times for the proximity tiebreaker in blind trust.
