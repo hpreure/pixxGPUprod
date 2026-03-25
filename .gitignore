@@ -30,6 +30,7 @@ venv/
 ENV/
 env/
 .venv
+.service
 
 # IDEs
 .vscode/
