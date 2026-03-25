@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  pixxengine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pixxengine:latest
+    container_name: pixxengine_dev
+    
+    # Enable GPU support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # Volume mounts with hot-reload
+    volumes:
+      - .:/app:cached
+      - /app/pixxEngine_venv  # Exclude venv from syncing
+      - ./data:/app/data:cached
+      - ./logs:/app/logs:cached
+      - ./config:/app/config:cached
+    
+    # Port mappings
+    ports:
+      - "5000:5000"
+      - "8000:8000"
+      - "8080:8080"
+    
+    # Environment variables
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+    
+    # Interactive terminal
+    stdin_open: true
+    tty: true
+    
+    # Keep container running
+    command: /bin/bash
+    
+    # Restart policy
+    restart: unless-stopped
