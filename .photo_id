@@ -1,0 +1,91 @@
+-[ RECORD 1 ]--+-------------------------------------
+id             | 521e9bd6-58dd-4c8c-b756-b1a1788ae3e3
+match_type     | golden_sample
+assigned_bib   | 715
+ocr_bib        | 715
+face_quality   | 0.9023
+confidence     | 0.9072
+ocr_confidence | 0.9736
+photo_id       | 9393d8e3-495d-5fd8-8bcf-3b141c09d024
+-[ RECORD 2 ]--+-------------------------------------
+id             | 2479f40f-2cb9-42c4-9ee9-58f6ad4f8080
+match_type     | golden_sample
+assigned_bib   | 715
+ocr_bib        | 715
+face_quality   | 0.8794
+confidence     | 0.9219
+ocr_confidence | 0.9992
+photo_id       | 42ccb7c8-4d19-509a-84d4-66e185d6a62f
+-[ RECORD 3 ]--+-------------------------------------
+id             | e1fe9c7a-d59b-4f2c-9543-653d826b6dab
+match_type     | golden_sample
+assigned_bib   | 715
+ocr_bib        | 715
+face_quality   | 0.9053
+confidence     | 0.8965
+ocr_confidence | 0.9988
+photo_id       | 231de01e-1cbd-5a2d-b37a-25421a47907e
+-[ RECORD 4 ]--+-------------------------------------
+id             | 6e2da95e-3626-4fe8-8fd7-2e4ca3a83a2a
+match_type     | golden_sample
+assigned_bib   | 715
+ocr_bib        | 715
+face_quality   | 0.9092
+confidence     | 0.9189
+ocr_confidence | 0.9995
+photo_id       | ae82e381-7c37-5eac-94c4-7f0aedf6a30c
+-[ RECORD 5 ]--+-------------------------------------
+id             | 035044a6-ac1e-4f97-ac7b-bf1b0d4d3e01
+match_type     | golden_sample
+assigned_bib   | 715
+ocr_bib        | 715
+face_quality   | 0.8989
+confidence     | 0.9341
+ocr_confidence | 0.9989
+photo_id       | 3a464080-028a-55be-870e-497668634025
+-[ RECORD 6 ]--+-------------------------------------
+id             | 9a7dfc52-0de6-4ce6-befd-59f10ca5e529
+match_type     | golden_sample
+assigned_bib   | 715
+ocr_bib        | 
+face_quality   | 0.8613
+confidence     | 0.9404
+ocr_confidence | 
+photo_id       | a38e5b30-cca7-519a-ae90-fca552ac25c8
+-[ RECORD 7 ]--+-------------------------------------
+id             | f5dc376c-bae7-4d53-acce-7b43798ce33e
+match_type     | golden_sample
+assigned_bib   | 715
+ocr_bib        | 
+face_quality   | 0.7676
+confidence     | 0.8628
+ocr_confidence | 
+photo_id       | cde039f1-db8f-5ea5-a667-05b22f843367
+-[ RECORD 8 ]--+-------------------------------------
+id             | 08d5709d-7492-4934-888d-0dd35cda00ec
+match_type     | golden_sample
+assigned_bib   | 715
+ocr_bib        | 715
+face_quality   | 0.9028
+confidence     | 0.9292
+ocr_confidence | 0.9983
+photo_id       | a8ae4d75-0334-533c-8351-a38f8653e762
+-[ RECORD 9 ]--+-------------------------------------
+id             | 4515b780-9615-406b-beb3-54112b4173ae
+match_type     | golden_sample
+assigned_bib   | 715
+ocr_bib        | 715
+face_quality   | 0.8804
+confidence     | 0.9155
+ocr_confidence | 0.9985
+photo_id       | 76d705bb-6b0a-5338-ad36-d7cfd323b082
+-[ RECORD 10 ]-+-------------------------------------
+id             | dd646570-70de-4a00-b85e-787e991683b8
+match_type     | ocr_unvalidated
+assigned_bib   | 715
+ocr_bib        | 715
+face_quality   | 0.8892
+confidence     | 0.9077
+ocr_confidence | 0.9721
+photo_id       | b10e8450-e0da-5fdb-805f-35c6e8408530
+

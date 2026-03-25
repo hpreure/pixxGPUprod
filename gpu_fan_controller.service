@@ -1,0 +1,41 @@
+[Unit]
+Description=GPU-Temperature Based Chassis Fan Controller for pixxEngine
+After=network.target
+Documentation=https://github.com/pixxlightme/pixxEngine
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/pixxEngine/scripts/gpu_fan_controller.py \
+  --min-temp 45 \
+  --max-temp 75 \
+  --hysteresis-low 45 \
+  --hysteresis-high 65 \
+  --hysteresis-duration 20 \
+  --min-pwm 22 \
+  --max-pwm 255 \
+  --interval 10
+
+# Restart on failure
+Restart=always
+RestartSec=5
+
+# Process management
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/sys/class/hwmon
+PrivateDevices=no
+PrivateTmp=no
+
+# Service dependencies
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gpu-fan-controller
+
+[Install]
+WantedBy=multi-user.target

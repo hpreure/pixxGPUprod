@@ -1,8 +1,8 @@
-# Virtual environments
+# Virtual environment
 pixxEngine_venv/
 venv/
-env/
 .venv/
+env/
 
 # Python cache
 __pycache__/
@@ -10,52 +10,66 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
+.eggs/
+dist/
+build/
 
-# IDE
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-.DS_Store
-
-# Logs
-logs/
-*.log
+.code-workspace
 
 # Git
 .git/
 .gitignore
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
+# Docker files (not needed inside container)
+Dockerfile
+docker-compose*.yml
+.docker/
+
+# Documentation
+*.md
+docs/
+README*
+
+# Test files
+tests/
+test/
+*_test.py
+test_*.py
+
+# Logs (mounted as volume)
+logs/
+*.log
+
+# Data files (mounted as volume)
+data/
 
 # Environment files
 .env
-.env.local
+.env.*
+*.env
 
-# OS
+# OS files
 .DS_Store
 Thumbs.db
 
-# Docker files (optional)
-Dockerfile
-docker-compose.yml
-.dockerignore
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# Model files (consider mounting as volume instead)
+*.pt
+*.pth
+*.onnx
+*.bin
+*.safetensors
+
+# Temporary files
+tmp/
+temp/
+*.tmp

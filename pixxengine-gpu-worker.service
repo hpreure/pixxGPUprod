@@ -1,0 +1,30 @@
+[Unit]
+Description=pixxEngine GPU Worker — Tier 1: Raw Inference
+After=network.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pixxadmin
+Group=pixxadmin
+WorkingDirectory=/opt/pixxEngine
+Environment="PATH=/opt/pixxEngine/pixxEngine_venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONPATH=/opt/pixxEngine"
+Environment="LD_LIBRARY_PATH=/opt/pixxEngine/pixxEngine_venv/lib/python3.12/site-packages/tensorrt_libs"
+Environment="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+ExecStart=/opt/pixxEngine/pixxEngine_venv/bin/python -m src.workers.asymmetric_gpu_worker
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/opt/pixxEngine/logs/gpu_worker.log
+StandardError=append:/opt/pixxEngine/logs/gpu_worker_error.log
+
+# Resource limits — GPU worker needs full GPU + memory headroom
+MemoryLimit=16G
+CPUQuota=800%
+
+# Security
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
