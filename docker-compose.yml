@@ -30,7 +30,7 @@ services:
     ports:
       # 🔒 Accessible on LAN by services (Dashboard, etc.)
       - "192.168.1.100:5432:5432"
-      - "100.122.88.68:5432:5432"   # Tailscale (for VPS sync)
+      - "100.117.2.36:5432:5432"   # Tailscale (for VPS sync)
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pixxadmin -d pixxengine"]
       interval: 10s
@@ -66,9 +66,9 @@ services:
     ports:
       # 📡 AMQP: Accessible by GPU2 (LAN) and VPS (Tailscale)
       - "192.168.1.100:5672:5672"   # LAN (for GPU2)
-      - "100.122.88.68:5672:5672"   # Tailscale (for VPS)
+      - "100.117.2.36:5672:5672"   # Tailscale (for VPS)
       # 🔒 Management UI: Tailscale only (for admin access)
-      - "100.122.88.68:15672:15672" # Tailscale (admin)
+      - "100.117.2.36:15672:15672" # Tailscale (admin)
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -148,12 +148,12 @@ services:
       GF_SECURITY_ADMIN_USER: pixxadmin
       GF_SECURITY_ADMIN_PASSWORD: "pixxEngine2026"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
-      GF_SERVER_ROOT_URL: "http://100.122.88.68:3000"
+      GF_SERVER_ROOT_URL: "http://100.117.2.36:3000"
     volumes:
       - grafana_data:/var/lib/grafana
     ports:
       # 🔒 Tailscale only — access from your laptop via Tailscale
-      - "100.122.88.68:3000:3000"
+      - "100.117.2.36:3000:3000"
     depends_on:
       loki:
         condition: service_healthy
@@ -188,8 +188,8 @@ services:
     volumes:
       - dbgate_data:/root/.dbgate
     ports:
-      # 🔒 Tailscale only — access from your laptop via http://100.122.88.68:8080
-      - "100.122.88.68:8080:3000"
+      # 🔒 Tailscale only — access from your laptop via http://100.117.2.36:8080
+      - "100.117.2.36:8080:3000"
     depends_on:
       postgres:
         condition: service_healthy
