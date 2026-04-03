@@ -805,6 +805,32 @@ def run_cascade(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Course Photo — Lightweight Classification
+# ═══════════════════════════════════════════════════════════════════
+
+def _course_classify_clusters(
+    clusters: List[IdentityCluster],
+    registered_bibs: set,
+) -> None:
+    """Assign match_types to course clusters without the 13-rule cascade.
+
+    No timing gates, no hint matching — just checks whether the cluster
+    has OCR and whether that bib corresponds to a registered participant.
+    The actual identity resolution (biometric validation / gallery search)
+    is deferred to the Master Scribe, which has DB access.
+
+    Match types assigned here:
+      - course_ocr:     bib visible and belongs to a registered participant
+      - course_unknown:  no bib, invalid bib, or unregistered bib
+    """
+    for c in clusters:
+        if c.consensus_bib and c.consensus_bib in registered_bibs:
+            c.assign(c.consensus_bib, "course_ocr")
+        else:
+            c.assign(None, "course_unknown")
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Phase 3: Intent Payload Construction
 # ═══════════════════════════════════════════════════════════════════
 
@@ -962,27 +988,82 @@ def process_payload(payload: dict) -> bool:
     _status(f"[IDC:{short_tag}] Processing {n_images} images | P{priority} "
             f"{'FL' if is_fl else 'COURSE'}")
 
-    # ── Course passthrough (V3 Phase 1: FL only) ─────────────────
+    # ── Course processing (V3 Phase 2) ──────────────────────────
     if not is_fl:
-        _status(f"[IDC:{short_tag}] Course burst — passthrough (V3 Phase 1)")
-        scribe_task = {
-            "schema_version": 3,
-            "burst_id": burst_id,
-            "project_id": project_id,
-            "photo_ids": payload.get("photo_ids", []),
-            "job_id": payload.get("job_id"),
-            "priority": priority,
-            "photos": [],
-            "intents": [],
-            "photo_status": [],
-            "summary": {
-                "cluster_count": 0, "matched_count": 0, "ghost_count": 0,
-                "match_types": {},
-                "inference_ms": payload.get("inference_ms", 0),
-                "cluster_ms": 0,
-            },
-        }
-        return publish_scribe_task(scribe_task)
+        if not _cfg.COURSE_ENABLE:
+            _status(f"[IDC:{short_tag}] Course burst — passthrough (disabled)")
+            scribe_task = {
+                "schema_version": 3,
+                "burst_id": burst_id,
+                "project_id": project_id,
+                "photo_ids": payload.get("photo_ids", []),
+                "job_id": payload.get("job_id"),
+                "priority": priority,
+                "photos": [],
+                "intents": [],
+                "photo_status": [],
+                "summary": {
+                    "cluster_count": 0, "matched_count": 0, "ghost_count": 0,
+                    "match_types": {},
+                    "inference_ms": payload.get("inference_ms", 0),
+                    "cluster_ms": 0,
+                },
+            }
+            return publish_scribe_task(scribe_task)
+
+        # Phase 1: cluster detections (5-step merge, no timing hints)
+        clusters = cluster_burst_detections(payload.get("images", []), burst_hints=None)
+        log.info("course_clusters_built",
+            cluster_count=len(clusters),
+            with_ocr=sum(1 for c in clusters if c.consensus_bib),
+            without_ocr=sum(1 for c in clusters if not c.consensus_bib),
+        )
+
+        # Phase 2: lightweight course classification (no cascade)
+        registered_bibs = _ref_cache.get_registered_bibs(project_id)
+        _course_classify_clusters(clusters, registered_bibs)
+
+        matched = [c for c in clusters if c.assigned_bib]
+        match_types: dict = {}
+        for c in clusters:
+            if c.match_type:
+                match_types[c.match_type] = match_types.get(c.match_type, 0) + 1
+        log.info("course_classification_complete",
+            cluster_count=len(clusters), matched=len(matched),
+            match_types=match_types,
+        )
+
+        # Phase 3: build & publish scribe task (reuse existing builder)
+        scribe_task = _build_scribe_task(payload, clusters, project_id, is_fl, t0)
+        success = publish_scribe_task(scribe_task)
+
+        if success:
+            elapsed = (time.time() - t0) * 1000
+            _status(
+                f"[IDC:{short_tag}] Course: {len(clusters)} clusters, "
+                f"{len(matched)} with OCR | {elapsed:.0f}ms",
+                CYAN,
+            )
+            log_burst_metrics(
+                burst_id=burst_id,
+                project_id=project_id,
+                latency_total_burst_ms=elapsed,
+                latency_ocr_pipeline_ms=float(payload.get("inference_ms", 0)),
+                batch_size_images=n_images,
+                batch_size_persons=sum(
+                    len(img.get("persons", []))
+                    for img in payload.get("images", []) if img.get("success")
+                ),
+                clusters_total=len(clusters),
+                clusters_matched=len(matched),
+                clusters_ghosts=sum(1 for c in clusters if c.match_type and "ghost" in c.match_type),
+                match_type_distribution=match_types,
+                priority=priority,
+                is_finish_line=is_fl,
+            )
+        else:
+            log.error("course_scribe_publish_failed")
+        return success
 
     # ── Load reference data (cached per project) ─────────────────
     valid_bibs = _ref_cache.get_valid_bibs(project_id)

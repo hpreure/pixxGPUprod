@@ -489,7 +489,7 @@ def process_burst(
 # Probe Calibration Handler
 # ──────────────────────────────────────────────────────────────────────────
 
-def _handle_probe_calibration(message: Dict) -> Dict:
+def _handle_probe_calibration(message: Dict, engine=None) -> Dict:
     """
     Handle probe_calibration task.
 
@@ -502,22 +502,22 @@ def _handle_probe_calibration(message: Dict) -> Dict:
     photos = payload.get('photos', [])
     if not photos:
         logger.warning("calibration_no_photos")
-        return {
+        return [{
             "task_type": "probe_calibration_result",
             "project_id": int(project_id),
             "status": "failed",
             "error": "No photos provided",
-        }
+        }]
 
     # Filter out fetch failures
     valid_photos = [p for p in photos if not p.get('_fetch_failed')]
     if not valid_photos:
-        return {
+        return [{
             "task_type": "probe_calibration_result",
             "project_id": int(project_id),
             "status": "failed",
             "error": "All photo downloads failed",
-        }
+        }]
 
     # Group photos by camera
     cameras: Dict[str, list] = {}
@@ -534,15 +534,18 @@ def _handle_probe_calibration(message: Dict) -> Dict:
             project_id=project_id,
             photos=camera_photos,
             camera_serial=camera_serial,
+            engine=engine,
         )
         results.append(result)
 
-    return results[0] if results else {
-        "task_type": "probe_calibration_result",
-        "project_id": int(project_id),
-        "status": "failed",
-        "error": "No results",
-    }
+    if not results:
+        return [{
+            "task_type": "probe_calibration_result",
+            "project_id": int(project_id),
+            "status": "failed",
+            "error": "No results",
+        }]
+    return results
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -596,6 +599,30 @@ def run_worker(device: str = "cuda:0") -> None:
       - ``bib_detection``      → ``raw_inference_results`` (CPU worker refines)
       - ``probe_calibration``  → ``scribe_tasks`` (final result, bypass CPU)
     """
+    # ── Limit CPU thread pools to prevent oversubscription ─────────
+    # With N workers per GPU, each worker's thread pools (OpenCV,
+    # PyTorch, OpenMP) must be capped so the total stays under the
+    # core count.  Without this, 6 workers × 64 default threads =
+    # 384+ threads thrashing 64 cores → CPU 98 %, GPU starved.
+    import os
+    _n_cores = os.cpu_count() or 64
+    _workers_estimate = int(os.getenv("PIXX_TOTAL_WORKERS", "6"))
+    _threads_per_worker = max(2, _n_cores // _workers_estimate)
+    os.environ.setdefault("OMP_NUM_THREADS", str(_threads_per_worker))
+    os.environ.setdefault("MKL_NUM_THREADS", str(_threads_per_worker))
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", str(_threads_per_worker))
+
+    import cv2
+    cv2.setNumThreads(_threads_per_worker)
+
+    import torch
+    torch.set_num_threads(_threads_per_worker)
+    torch.set_num_interop_threads(_threads_per_worker)
+
+    # Pin CUDA context so TensorRT streams bind to the correct GPU
+    if device.startswith("cuda:"):
+        torch.cuda.set_device(int(device.split(":")[1]))
+
     import pika as _pika
     from src.messaging import create_mq_client, create_local_connection
     from src.metrics.burst_logger import log_exception
@@ -640,22 +667,32 @@ def run_worker(device: str = "cuda:0") -> None:
                     f"{len(message.get('payload', {}).get('photos', []))} photos "
                     f"from {shm_dir}"
                 )
-                result = _handle_probe_calibration(message)
+                results = _handle_probe_calibration(message, engine=engine)
 
-                # Publish calibration result directly to scribe_tasks
+                # Publish each camera's calibration result to scribe_tasks
                 # (bypasses CPU worker — calibration results are final,
                 #  no raw inference data to refine)
-                published = local_mq.publish_json(QUEUE_SCRIBE_TASKS, result)
-                if published:
+                all_published = True
+                for result in results:
+                    published = local_mq.publish_json(QUEUE_SCRIBE_TASKS, result)
+                    if published:
+                        status = result.get("status", "?")
+                        offset = result.get("offset_seconds")
+                        cam = result.get("camera_serial", "?")
+                        offset_str = f"{offset}s" if offset is not None else "N/A"
+                        _status(
+                            f"[AsymGPU] Calibration {status}: "
+                            f"camera={cam} offset={offset_str}",
+                            GREEN if status == "completed" else YELLOW,
+                        )
+                    else:
+                        log.error("calibration_publish_failed",
+                                  camera=result.get("camera_serial"))
+                        all_published = False
+
+                if all_published:
                     ch.basic_ack(delivery_tag=delivery_tag)
-                    status = result.get("status", "?")
-                    offset = result.get("offset_seconds", "?")
-                    _status(
-                        f"[AsymGPU] Calibration {status}: offset={offset}s",
-                        GREEN if status == "completed" else YELLOW,
-                    )
                 else:
-                    log.error("calibration_publish_failed")
                     ch.basic_nack(delivery_tag=delivery_tag, requeue=True)
                     cal_requeued = True
 
@@ -875,8 +912,8 @@ BANNER = """
 
 def main():
     print(BANNER, flush=True)
-    logger.info("worker_starting")
-    run_worker()
+    logger.info("worker_starting", device=settings.INFERENCE_DEVICE)
+    run_worker(device=settings.INFERENCE_DEVICE)
 
 
 if __name__ == "__main__":

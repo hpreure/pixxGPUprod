@@ -407,12 +407,6 @@ class DetectionConfig:
     #         quality is below this floor (low-quality = unreliable).
     FL_CASCADE_MIN_FACE_QUALITY: float = 0.80
 
-    # Gate C: use bipartite graph matching (Hungarian algorithm) instead
-    # of the greedy sequential cascade for finish-line identity resolution.
-    # When True, all cluster-to-hint assignments are optimised globally
-    # via a cost matrix, eliminating first-claim ordering bias.
-    FL_USE_BIPARTITE: bool = True
-
     # ── Enrollment Similarity Gate ─────────────────────────────────
     # Minimum face cosine similarity between an incoming vector and the
     # existing centroid before the blend is allowed.  Only applies when
@@ -432,16 +426,34 @@ class DetectionConfig:
     # tight enough to reject photos from mid-course (e.g. 34 min gap).
     DELAYED_MAX_DELTA_S: float = 20.0
 
-    # ── Bipartite Cost-Matrix Weights ──────────────────────────────
-    # Tuneable without touching worker source.  Changing W_TIME is the
-    # most common need (e.g. when the finish-line clock drifts).
-    BIPARTITE_W_OCR:  float = 1.0   # OCR agreement weight
-    BIPARTITE_W_BIO:  float = 0.8   # biometric distance weight
-    BIPARTITE_W_TIME: float = 0.5   # timing proximity weight
-    BIPARTITE_MAX_COST: float = 1.8 # reject threshold (above → unassigned)
+    # ==========================================
+    # 7. COURSE PHOTO MATCHING
+    # ==========================================
+    #
+    # Course photos (priority < 9) are matched against confirmed
+    # finish-line identities.  No timing gates, no cascade — just
+    # OCR fuzzy matching + biometric validation.
+
+    # Feature flag — set False to preserve V3 Phase 1 stub behaviour
+    COURSE_ENABLE: bool = True
+
+    # Above this OCR confidence, only allow substring/occlusion matches
+    # (no Hamming-1 single-char misread).  A confident "476" should NOT
+    # fuzzy-match "416" — that's likely a different runner.
+    # Below this threshold, both occlusion and misread are considered.
+    COURSE_OCR_MISREAD_CONF: float = 0.85
+
+    # Path A thresholds: validate a bib-bearing cluster against the
+    # confirmed identity for that bib.  Reuse cascade-level gates.
+    COURSE_BIB_FACE_MIN: float = 0.75       # face-strict
+    COURSE_BIB_REID_MIN: float = 0.85       # ReID-strong
+    COURSE_BIB_FACE_SOFT: float = 0.60      # face-soft (when ReID leads)
+
+    # Path B: pgvector gallery KNN search limit (no bib available)
+    COURSE_GALLERY_TOP_K: int = 5
 
     # ==========================================
-    # 7. OCR ERROR MAP (Known Misread Patterns)
+    # 8. OCR ERROR MAP (Known Misread Patterns)
     # ==========================================
     #
     # Constrained lookup table for known OCR hallucinations specific to

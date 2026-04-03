@@ -64,7 +64,8 @@ class ProbeCalibration:
     def calculate_offset(
         self,
         photos: List[dict],
-        camera_serial: str
+        camera_serial: str,
+        engine=None,
     ) -> Tuple[Optional[float], str]:
         """
         Calculate camera time offset from a batch of finish line photos.
@@ -72,6 +73,8 @@ class ProbeCalibration:
         Args:
             photos: List of photo dicts with 'path' and 'capture_time'
             camera_serial: Camera serial number
+            engine: Optional InferenceEngine instance (avoids creating a
+                    second engine on the wrong GPU in multi-GPU setups)
         
         Returns:
             Tuple of (offset_seconds, status)
@@ -92,7 +95,10 @@ class ProbeCalibration:
             photo_times[abs_path] = photo['capture_time']
         
         # Run inference on all photos (probe profile — no ReID/Face)
-        engine = get_engine(profile=PROFILE_PROBE)
+        if engine is None:
+            engine = get_engine(profile=PROFILE_PROBE)
+        else:
+            engine.load_models(profile=PROFILE_PROBE)
         results: List[InferenceResult] = engine.process_photos(photo_paths)
         
         # Collect time deltas from successful OCR matches
@@ -247,7 +253,8 @@ class ProbeCalibration:
 def run_probe_calibration(
     project_id: str,
     photos: List[dict],
-    camera_serial: str
+    camera_serial: str,
+    engine=None,
 ) -> Dict:
     """
     Run probe calibration and return the result.
@@ -260,13 +267,15 @@ def run_probe_calibration(
         project_id: Project ID
         photos: List of photo dictionaries
         camera_serial: Camera serial number
+        engine: Optional InferenceEngine to reuse (avoids device mismatch
+                in multi-GPU setups)
     
     Returns:
         Result dictionary with offset and status
     """
     try:
         calibrator = ProbeCalibration(project_id)
-        offset, status = calibrator.calculate_offset(photos, camera_serial)
+        offset, status = calibrator.calculate_offset(photos, camera_serial, engine=engine)
         
         return {
             "task_type": "probe_calibration_result",

@@ -964,6 +964,130 @@ def load_identity_centroids(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Course Photo — Identity Matching Helpers
+# ═══════════════════════════════════════════════════════════════════
+
+def load_confirmed_identities(
+    cur, project_id: str,
+) -> Dict[str, Tuple[str, Optional[np.ndarray], Optional[np.ndarray]]]:
+    """Return {bib: (identity_id, face_centroid, reid_centroid)} for all
+    confirmed (non-ghost) identities in the project.
+
+    Used by the course photo matching path to build the in-RAM candidate
+    set for fuzzy bib lookup and biometric validation.
+    """
+    cur.execute("""
+        SELECT id, bib, face_centroid, reid_centroid
+        FROM   pipeline.identities
+        WHERE  project_id = %s
+          AND  bib IS NOT NULL
+    """, (project_id,))
+    result: Dict[str, Tuple[str, Optional[np.ndarray], Optional[np.ndarray]]] = {}
+    for row_id, bib, face_c, reid_c in cur.fetchall():
+        face_vec = np.array(face_c, dtype=np.float32) if face_c is not None else None
+        reid_vec = np.array(reid_c, dtype=np.float32) if reid_c is not None else None
+        result[bib] = (str(row_id), face_vec, reid_vec)
+    return result
+
+
+def load_confirmed_bib_strings(
+    cur, project_id: str,
+) -> Dict[str, str]:
+    """Return {bib: identity_id} for all confirmed (non-ghost) identities.
+
+    Lightweight string-only query (~5ms) used as the first stage of
+    course photo matching: fuzzy bib matching needs only strings, not
+    the 512+768-dim vectors that dominate transfer time.
+    """
+    cur.execute("""
+        SELECT id, bib
+        FROM   pipeline.identities
+        WHERE  project_id = %s
+          AND  bib IS NOT NULL
+    """, (project_id,))
+    return {bib: str(row_id) for row_id, bib in cur.fetchall()}
+
+
+def load_centroids_for_bibs(
+    cur, project_id: str, bibs: set,
+) -> Dict[str, Tuple[str, Optional[np.ndarray], Optional[np.ndarray]]]:
+    """Return {bib: (identity_id, face_centroid, reid_centroid)} for specific bibs.
+
+    Second stage of course photo matching: after fuzzy string matching
+    narrows to 1-3 candidates, fetch only their vectors for biometric
+    validation.  Replaces the 25 MB bulk download with a targeted fetch.
+    """
+    if not bibs:
+        return {}
+    bib_list = sorted(bibs)
+    cur.execute("""
+        SELECT id, bib, face_centroid, reid_centroid
+        FROM   pipeline.identities
+        WHERE  project_id = %s
+          AND  bib = ANY(%s)
+          AND  bib IS NOT NULL
+    """, (project_id, bib_list))
+    result: Dict[str, Tuple[str, Optional[np.ndarray], Optional[np.ndarray]]] = {}
+    for row_id, bib, face_c, reid_c in cur.fetchall():
+        face_vec = np.array(face_c, dtype=np.float32) if face_c is not None else None
+        reid_vec = np.array(reid_c, dtype=np.float32) if reid_c is not None else None
+        result[bib] = (str(row_id), face_vec, reid_vec)
+    return result
+
+
+def find_nearest_identities(
+    cur, project_id: str,
+    face_vec, reid_vec,
+    top_k: int = 5,
+) -> List[Tuple[str, str, float, float]]:
+    """pgvector KNN search against confirmed (non-ghost) identities.
+
+    Uses the HNSW index on face_centroid for initial candidate retrieval,
+    then computes both face and ReID similarity for the top-K results.
+
+    Returns list of (identity_id, bib, face_sim, reid_sim) sorted by
+    face_sim descending.  Empty list if no face vector provided.
+    """
+    if face_vec is None:
+        return []
+    face_pg = _vec_to_pg(face_vec)
+    reid_pg = _vec_to_pg(reid_vec) if reid_vec is not None else None
+
+    # KNN by face centroid, then compute both similarities server-side
+    if reid_pg is not None:
+        cur.execute("""
+            SELECT id, bib,
+                   1 - (face_centroid <=> %s::vector) AS face_sim,
+                   CASE WHEN reid_centroid IS NOT NULL
+                        THEN 1 - (reid_centroid <=> %s::vector)
+                        ELSE 0.0 END AS reid_sim
+            FROM   pipeline.identities
+            WHERE  project_id = %s
+              AND  bib IS NOT NULL
+              AND  face_centroid IS NOT NULL
+            ORDER  BY face_centroid <=> %s::vector
+            LIMIT  %s
+        """, (face_pg, reid_pg, project_id, face_pg, top_k))
+    else:
+        cur.execute("""
+            SELECT id, bib,
+                   1 - (face_centroid <=> %s::vector) AS face_sim,
+                   0.0 AS reid_sim
+            FROM   pipeline.identities
+            WHERE  project_id = %s
+              AND  bib IS NOT NULL
+              AND  face_centroid IS NOT NULL
+            ORDER  BY face_centroid <=> %s::vector
+            LIMIT  %s
+        """, (face_pg, project_id, face_pg, top_k))
+
+    results: List[Tuple[str, str, float, float]] = []
+    for row_id, bib, f_sim, r_sim in cur.fetchall():
+        results.append((str(row_id), bib, float(f_sim), float(r_sim)))
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Bib Compatibility
 # ═══════════════════════════════════════════════════════════════════
 
